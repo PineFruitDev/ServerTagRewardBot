@@ -18,6 +18,7 @@ import discord
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.logger import get_logger
+from src.services.streaks import StreakStore
 
 log = get_logger("TagSyncService")
 
@@ -91,11 +92,13 @@ class TagSyncService:
             return
 
         user = data["user"]
+        repping = self.is_repping(user, guild_id)
         if event == "GUILD_MEMBER_UPDATE":
             self.stats_for(guild_id).live_updates += 1
-            await self.apply_role(guild_id, role_id, user["id"],
-                                  self.is_repping(user, guild_id), data.get("roles"))
-        elif self.is_repping(user, guild_id):
+            StreakStore.get_instance().mark(guild_id, user["id"], repping)
+            await self.apply_role(guild_id, role_id, user["id"], repping, data.get("roles"))
+        elif repping:
+            StreakStore.get_instance().mark(guild_id, user["id"], True)
             await self.apply_role(guild_id, role_id, user["id"], True, data.get("roles"))
 
     async def apply_role(self, guild_id: str, role_id: str, user_id: str,
@@ -161,6 +164,7 @@ class TagSyncService:
                     should_have = self.is_repping(user, guild_id)
                     if should_have:
                         repping += 1
+                    StreakStore.get_instance().mark(guild_id, user["id"], should_have)
                     await self.apply_role(guild_id, role_id, user["id"], should_have, member.get("roles"))
 
                 if len(batch) < 1000:
