@@ -19,3 +19,6 @@ Thumbs.db
 # Logs
 logs/
 *.log
+
+# Per-guild config store
+data.db

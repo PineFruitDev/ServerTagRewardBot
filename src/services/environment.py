@@ -1,7 +1,9 @@
 """Environment validation service.
 
 Ensures all required environment variables are present and valid before
-the bot starts, with helpful error messages when they aren't.
+the bot starts, with helpful error messages when they aren't. Per-guild
+settings (reward roles) live in the SQLite store, not here - this bot is
+public and serves any number of servers.
 """
 
 import os
@@ -12,12 +14,12 @@ from src.services.logger import get_logger
 
 log = get_logger("Environment")
 
-REQUIRED_VARS = ("DISCORD_TOKEN", "GUILD_ID", "TAG_ROLE_ID")
+REQUIRED_VARS = ("DISCORD_TOKEN",)
 
 OPTIONAL_VARS = {
     "ENVIRONMENT": "production",
     "DEVELOPER_IDS": "",
-    "SYNC_ON_START": "true",
+    "SYNC_ON_START": "false",
     "SYNC_DELAY_MS": "350",
 }
 
@@ -27,8 +29,6 @@ _SNOWFLAKE = re.compile(r"^\d{17,20}$")
 @dataclass
 class Config:
     discord_token: str
-    guild_id: str
-    tag_role_id: str
     environment: str
     sync_on_start: bool
     sync_delay_ms: int
@@ -63,8 +63,6 @@ class Environment:
                 continue
             if name == "DISCORD_TOKEN" and not cls._is_valid_token(value):
                 invalid.append(f"{name} (invalid format)")
-            if name in ("GUILD_ID", "TAG_ROLE_ID") and not _SNOWFLAKE.match(value):
-                invalid.append(f"{name} (invalid format)")
 
         for name, default in OPTIONAL_VARS.items():
             if not os.getenv(name):
@@ -94,8 +92,6 @@ class Environment:
         if cls._config is None:
             cls._config = Config(
                 discord_token=os.environ["DISCORD_TOKEN"],
-                guild_id=os.environ["GUILD_ID"],
-                tag_role_id=os.environ["TAG_ROLE_ID"],
                 environment=os.getenv("ENVIRONMENT", "production"),
                 sync_on_start=os.getenv("SYNC_ON_START", "true").lower() == "true",
                 sync_delay_ms=int(os.getenv("SYNC_DELAY_MS", "350")),
@@ -117,8 +113,6 @@ class Environment:
         token = os.environ["DISCORD_TOKEN"]
         masked = token[:6] + "***" + token[-4:] if len(token) >= 10 else "***"
         log.info("validate - Environment: %s", os.getenv("ENVIRONMENT"))
-        log.info("validate - Guild ID: %s", os.getenv("GUILD_ID"))
-        log.info("validate - Tag Role ID: %s", os.getenv("TAG_ROLE_ID"))
         log.info("validate - Discord Token: %s", masked)
         dev_ids = cls._split_ids(os.getenv("DEVELOPER_IDS", ""))
         if dev_ids:
