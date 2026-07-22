@@ -11,6 +11,7 @@ Built on the [PyTemplateBot](https://github.com/PineFruitDev/PyTemplateBot) arch
 - **Live Tag Detection**: Reacts within seconds when members equip or remove your server tag
 - **Automatic Role Sync**: Grants the reward role on equip, removes it on unequip, no manual work
 - **First Sync, Your Call**: setup ends by asking "Would you like to sync your server tag rewards now?" with one-click buttons
+- **Streaks & Leaderboard**: `/repped` shows anyone's current, longest, and all-time tag streaks; `/leaderboard` ranks the server's most loyal reppers
 - **Admin Commands**: `/sync` for manual reconciliation, `/status` for live statistics, `/disable` to opt out
 - **Production Ready**: Per-guild stats, rate-limit friendly syncing, and clean architecture
 
@@ -73,6 +74,8 @@ src/
 ├── commands/
 │   ├── __init__.py           # ← Command registry (single source of truth)
 │   ├── setup.py              # /setup and /disable (admin onboarding)
+│   ├── repped.py             # Streak lookup
+│   ├── leaderboard.py        # Top reppers
 │   ├── status.py             # Per-server sync statistics
 │   ├── sync.py               # Manual full sync (admin)
 │   ├── ping.py               # Latency check
@@ -80,6 +83,7 @@ src/
 └── services/
     ├── tag_sync.py           # ← Tag detection + role sync engine (multi-guild)
     ├── guild_config.py       # Per-server reward roles (SQLite)
+    ├── streaks.py            # Streak tracking (SQLite)
     ├── logger.py             # Contextual logging
     └── environment.py        # Config validation
 main.py                       # Entry point
@@ -89,6 +93,8 @@ register.py                   # Command registration
 ## Commands
 
 - `/setup role:@Role` - Configure this server's reward role (requires Manage Server)
+- `/repped [user]` - Current, longest, and all-time tag streaks for you or another member
+- `/leaderboard [sort]` - Top reppers by current streak, longest streak, or all-time repped
 - `/status` - This server's sync statistics
 - `/sync` - Manual full member sync (requires Manage Server)
 - `/disable` - Stop managing the reward role in this server

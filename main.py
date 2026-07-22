@@ -9,6 +9,7 @@ from src.commands import ALL_COMMANDS
 from src.core.bot import Bot
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
+from src.services.streaks import StreakStore
 from src.services.logger import get_logger
 from src.services.tag_sync import TagSyncService
 
@@ -24,8 +25,9 @@ def main() -> None:
 
     log.info("Initializing bot with %d commands", len(ALL_COMMANDS))
 
-    # Per-guild reward roles live here (public bot, unlimited servers)
+    # Per-guild reward roles + streak history live here (public bot, unlimited servers)
     GuildConfig()
+    StreakStore()
 
     # GuildMembers is required for member update events (privileged intent)
     intents = discord.Intents.default()
