@@ -1,25 +1,35 @@
 # ServerTagRewardBot
 
-Reward your community for repping your server. This bot grants a role the moment a member equips your server's tag and removes it when they stop, keeping tag adoption and role perks perfectly in sync.
+Reward your community for repping your server. This public bot grants a role the moment a member equips your server's tag and removes it when they stop, keeping tag adoption and role perks perfectly in sync. Invite it, run `/setup`, done.
 
 Built on the [PyTemplateBot](https://github.com/PineFruitDev/PyTemplateBot) architecture: command class pattern, single source of truth, discord.py.
 
 ## Features
 
+- **Public & Multi-Server**: One hosted bot serves unlimited servers; each configures its own reward
+- **2-Minute Setup**: `/setup role:@Role` walks admins through configuration, including role-position checks
 - **Live Tag Detection**: Reacts within seconds when members equip or remove your server tag
 - **Automatic Role Sync**: Grants the reward role on equip, removes it on unequip, no manual work
-- **Startup Sync**: Full member reconciliation at boot so existing tag-wearers get their role on day one
-- **Admin Commands**: `/sync` for manual reconciliation, `/status` for live statistics
-- **Environment Validation**: Comprehensive startup checks with helpful error messages
-- **Production Ready**: Error handling, rate-limit friendly syncing, and clean architecture
+- **First Sync, Your Call**: setup ends by asking "Would you like to sync your server tag rewards now?" with one-click buttons
+- **Admin Commands**: `/sync` for manual reconciliation, `/status` for live statistics, `/disable` to opt out
+- **Production Ready**: Per-guild stats, rate-limit friendly syncing, and clean architecture
+
+## Using the Bot (server admins)
+
+1. Invite the bot with the Manage Roles permission
+2. In Server Settings, Roles: drag the bot's role ABOVE the role you want to hand out
+3. Run `/setup role:@YourRole` and answer the sync prompt at the end
+4. That's it. Members repping your tag get the role within seconds; removing the tag removes the role. Check `/status` anytime.
+
+Your server needs the Server Tag feature enabled for members to equip a tag.
 
 ## How It Works
 
-Discord exposes a member's equipped server tag on the User object as `primary_guild` (`{ identity_guild_id, identity_enabled, tag, badge }`). A member is repping your tag when `identity_guild_id` matches your server and `identity_enabled` is true.
+Discord exposes a member's equipped server tag on the User object as `primary_guild` (`{ identity_guild_id, identity_enabled, tag, badge }`). A member is repping a server's tag when `identity_guild_id` matches that server and `identity_enabled` is true.
 
-The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time. A full sync walks every member and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
+The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles live in a local SQLite store; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
 
-## Quick Start
+## Self-Hosting
 
 ### 1. Setup
 
@@ -37,15 +47,13 @@ Edit `.env` with your bot credentials:
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
-GUILD_ID=your_server_id_here
-TAG_ROLE_ID=role_to_grant_here
 DEVELOPER_IDS=your_user_id_here  # Optional
 ENVIRONMENT=development          # Optional
 SYNC_ON_START=true               # Optional
 SYNC_DELAY_MS=350                # Optional
 ```
 
-> **Required Discord setup:** enable the **Server Members Intent** on the Bot page of the [Developer Portal](https://discord.com/developers/applications), invite the bot with the **Manage Roles** permission, and place the bot's role above the reward role in Server Settings > Roles.
+> **Required Discord setup:** enable the **Server Members Intent** on the Bot page of the [Developer Portal](https://discord.com/developers/applications) and invite with the **Manage Roles** permission.
 
 ### 3. Deploy
 
@@ -64,22 +72,26 @@ src/
 │   └── command_manager.py    # Command management
 ├── commands/
 │   ├── __init__.py           # ← Command registry (single source of truth)
-│   ├── ping.py               # Latency check
-│   ├── status.py             # Sync statistics
+│   ├── setup.py              # /setup and /disable (admin onboarding)
+│   ├── status.py             # Per-server sync statistics
 │   ├── sync.py               # Manual full sync (admin)
+│   ├── ping.py               # Latency check
 │   └── help_command.py       # Auto-generated help
 └── services/
-    ├── tag_sync.py           # ← Tag detection + role sync engine
+    ├── tag_sync.py           # ← Tag detection + role sync engine (multi-guild)
+    ├── guild_config.py       # Per-server reward roles (SQLite)
     ├── logger.py             # Contextual logging
     └── environment.py        # Config validation
 main.py                       # Entry point
 register.py                   # Command registration
 ```
 
-## Built-in Commands
+## Commands
 
-- `/status` - Sync statistics: members checked, roles added/removed, live updates seen
+- `/setup role:@Role` - Configure this server's reward role (requires Manage Server)
+- `/status` - This server's sync statistics
 - `/sync` - Manual full member sync (requires Manage Server)
+- `/disable` - Stop managing the reward role in this server
 - `/ping` - Basic ping/pong with latency
 - `/help [command]` - Auto-generated help system
 
@@ -88,18 +100,10 @@ register.py                   # Command registration
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | ✅ | Bot token from Discord Developer Portal |
-| `GUILD_ID` | ✅ | The server whose tag counts |
-| `TAG_ROLE_ID` | ✅ | The role to grant while the tag is equipped |
 | `DEVELOPER_IDS` | ❌ | Comma-separated user IDs for developer commands |
 | `ENVIRONMENT` | ❌ | Environment mode (defaults to production) |
-| `SYNC_ON_START` | ❌ | Run a full member sync at startup (defaults to true) |
+| `SYNC_ON_START` | ❌ | Sync all configured servers at startup (defaults to false; /setup handles first sync) |
 | `SYNC_DELAY_MS` | ❌ | Throttle between user re-fetches during sync (defaults to 350) |
-
-## Notes
-
-- Your server needs the Server Tag feature enabled for members to equip a tag
-- The bot only ever manages the one configured role
-- Large servers: startup sync is throttled; expect roughly 3 members/second when user re-fetches are needed
 
 ## License
 
