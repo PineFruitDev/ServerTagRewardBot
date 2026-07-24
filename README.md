@@ -111,9 +111,14 @@ register.py                   # Command registration
 | `SYNC_ON_START` | ❌ | Sync all configured servers at startup (defaults to false; /setup handles first sync) |
 | `SYNC_DELAY_MS` | ❌ | Throttle between user re-fetches during sync (defaults to 350) |
 
-## License
+## License Note
+This project is licensed under **[Apache 2.0](https://choosealicense.com/licenses/apache-2.0/) + the [Commons Clause](https://commonsclause.com/)**. In plain terms:
 
-MIT License - See LICENSE file for details.
+- ✅ **Free to use and self-host.** Invite the hosted bot or run your own copy for any community, at no cost.
+- ✅ **Forking and contributing is welcome.** Fork the repo, modify the code, and open a PR. Community contributions are encouraged.
+- ❌ **You cannot sell the bot itself.** The Commons Clause means you may not sell a product or service whose value derives *primarily* from this bot (for example, reselling it as a paid hosted service or as a paid bot product).
+
+In short: run the bot for whatever community you want, just do not resell the bot itself. See [LICENSE](LICENSE) for the full terms.
 
 ## Contributing
 
