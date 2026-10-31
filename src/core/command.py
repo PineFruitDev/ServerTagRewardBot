@@ -17,6 +17,25 @@ from src.services.logger import get_logger
 log = get_logger("Command")
 
 
+def bot_permissions(interaction: discord.Interaction) -> discord.Permissions | None:
+    """The bot's permissions in the interaction's guild, or None if unknowable.
+
+    Guild.me is the authoritative guild-wide set, but it is annotated as Member
+    while really being get_member(self), which returns None when the self member
+    was never cached (this bot runs without the members intent in limited mode).
+    Discord sends app_permissions with every guild interaction, so fall back to
+    that instead of raising AttributeError on None.
+    """
+    guild = interaction.guild
+    if guild is None:
+        return None
+    me = guild.me
+    if me is not None:
+        return me.guild_permissions
+    granted = getattr(interaction, "app_permissions", None)
+    return granted if isinstance(granted, discord.Permissions) else None
+
+
 @dataclass
 class CommandHelpInfo:
     """Help information for the auto-generated help system."""
@@ -60,10 +79,13 @@ class Command(ABC):
             return False, "This command can only be used in servers."
 
         if self.required_permissions and interaction.guild is not None:
-            me = interaction.guild.me
+            granted = bot_permissions(interaction)
+            if granted is None:
+                return False, ("I can't read my own permissions in this server yet. "
+                               "Give me a moment and try again.")
             missing = [
                 perm for perm in self.required_permissions
-                if not getattr(me.guild_permissions, perm, False)
+                if not getattr(granted, perm, False)
             ]
             if missing:
                 return False, f"Bot missing required permissions: {', '.join(missing)}"

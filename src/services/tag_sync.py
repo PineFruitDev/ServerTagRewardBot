@@ -10,6 +10,7 @@ the field changes, so role updates land within seconds across every guild.
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -28,6 +29,23 @@ SYNC_PAUSED_MESSAGE = (
     "⏸️ Live tag sync is paused while Discord reviews this bot's Server Members intent. "
     "Your settings and streaks are safe; roles will catch up once sync resumes."
 )
+
+_SNOWFLAKE = re.compile(r"^\d{1,20}$")
+
+
+def snowflake(value: object) -> str | None:
+    """Return value as a Discord id string, or None when it is not one.
+
+    Gateway payloads are parsed straight from JSON, so every id has to be shape
+    checked before it reaches int() or the store.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value) if value >= 0 else None
+    if isinstance(value, str) and _SNOWFLAKE.match(value):
+        return value
+    return None
 
 
 @dataclass
@@ -77,7 +95,9 @@ class TagSyncService:
     @staticmethod
     def is_repping(user: dict, guild_id: str) -> bool:
         """True when the raw user payload is repping THIS guild's tag."""
-        primary_guild = user.get("primary_guild") or {}
+        primary_guild = user.get("primary_guild")
+        if not isinstance(primary_guild, dict):
+            return False
         return bool(primary_guild.get("identity_enabled")) and \
             primary_guild.get("identity_guild_id") == str(guild_id)
 
@@ -98,14 +118,27 @@ class TagSyncService:
             payload = json.loads(msg)
         except (ValueError, TypeError):
             return
+        # Valid JSON is not necessarily a dispatch object: a bare array or
+        # scalar frame has no .get().
+        if not isinstance(payload, dict):
+            return
 
         event = payload.get("t")
         if event not in ("GUILD_MEMBER_UPDATE", "GUILD_MEMBER_ADD"):
             return
 
-        data = payload.get("d") or {}
-        guild_id = data.get("guild_id")
-        if not guild_id or "user" not in data:
+        data = payload.get("d")
+        if not isinstance(data, dict):
+            return
+
+        # Shape check the whole payload before doing any work, so a malformed
+        # event costs neither a store round trip nor a logged traceback.
+        guild_id = snowflake(data.get("guild_id"))
+        user = data.get("user")
+        if guild_id is None or not isinstance(user, dict):
+            return
+        user_id = snowflake(user.get("id"))
+        if user_id is None:
             return
 
         # Only act in guilds an admin has configured
@@ -113,15 +146,14 @@ class TagSyncService:
         if role_id is None:
             return
 
-        user = data["user"]
         repping = self.is_repping(user, guild_id)
         if event == "GUILD_MEMBER_UPDATE":
             self.stats_for(guild_id).live_updates += 1
-            await self.apply_role(guild_id, role_id, user["id"], repping, data.get("roles"))
-            await self._record_streaks(guild_id, [(user["id"], repping)])
+            await self.apply_role(guild_id, role_id, user_id, repping, data.get("roles"))
+            await self._record_streaks(guild_id, [(user_id, repping)])
         elif repping:
-            await self.apply_role(guild_id, role_id, user["id"], True, data.get("roles"))
-            await self._record_streaks(guild_id, [(user["id"], True)])
+            await self.apply_role(guild_id, role_id, user_id, True, data.get("roles"))
+            await self._record_streaks(guild_id, [(user_id, True)])
 
     @staticmethod
     async def _record_streaks(guild_id: str, marks: list[tuple[str, bool]]) -> None:
@@ -137,6 +169,15 @@ class TagSyncService:
     async def apply_role(self, guild_id: str, role_id: str, user_id: str,
                          should_have: bool, current_roles=None) -> None:
         """Add or remove the reward role, skipping redundant API calls when possible."""
+        # role_id comes from the store and the ids from a gateway payload. A
+        # single unparseable value would otherwise raise ValueError out of here
+        # on every member update, so reject it once and keep going.
+        guild_ref, user_ref, role_ref = (snowflake(guild_id), snowflake(user_id), snowflake(role_id))
+        if guild_ref is None or user_ref is None or role_ref is None:
+            log.error("apply_role - [%s] Skipped: ids must be numeric (user=%r, role=%r)",
+                      guild_id, user_id, role_id)
+            return
+
         has_role = None
         if isinstance(current_roles, list):
             has_role = role_id in current_roles
@@ -144,11 +185,11 @@ class TagSyncService:
         stats = self.stats_for(guild_id)
         try:
             if should_have and has_role is not True:
-                await self._client.http.add_role(int(guild_id), int(user_id), int(role_id))
+                await self._client.http.add_role(int(guild_ref), int(user_ref), int(role_ref))
                 stats.roles_added += 1
                 log.info("apply_role - [%s] Added role to %s", guild_id, user_id)
             elif not should_have and has_role is not False:
-                await self._client.http.remove_role(int(guild_id), int(user_id), int(role_id))
+                await self._client.http.remove_role(int(guild_ref), int(user_ref), int(role_ref))
                 stats.roles_removed += 1
                 log.info("apply_role - [%s] Removed role from %s", guild_id, user_id)
         except discord.HTTPException as exc:
@@ -183,23 +224,33 @@ class TagSyncService:
                 if not batch:
                     break
 
+                cursor = after
                 for member in batch:
-                    user = member["user"]
-                    after = int(user["id"])
+                    listed = member.get("user") if isinstance(member, dict) else None
+                    member_id = snowflake(listed.get("id")) if isinstance(listed, dict) else None
+                    if member_id is None:
+                        # One unusable row must not abandon the rest of the guild.
+                        log.warning("full_sync - [%s] Skipped a member with no usable id", guild_id)
+                        continue
+                    cursor = max(cursor, int(member_id))
                     checked += 1
 
+                    user = listed
                     if "primary_guild" not in user:
                         try:
-                            user = await self._client.http.get_user(int(user["id"]))
+                            fetched = await self._client.http.get_user(int(member_id))
                         except discord.HTTPException:
                             continue
                         await asyncio.sleep(config.sync_delay_ms / 1000)
+                        if not isinstance(fetched, dict):
+                            continue
+                        user = fetched
 
                     should_have = self.is_repping(user, guild_id)
                     if should_have:
                         repping += 1
-                    marks.append((user["id"], should_have))
-                    await self.apply_role(guild_id, role_id, user["id"], should_have, member.get("roles"))
+                    marks.append((member_id, should_have))
+                    await self.apply_role(guild_id, role_id, member_id, should_have, member.get("roles"))
 
                 # Batched: one store request per 50 members instead of one each
                 await self._record_streaks(guild_id, marks)
@@ -207,6 +258,12 @@ class TagSyncService:
 
                 if len(batch) < 1000:
                     break
+                if cursor == after:
+                    # A full page that never advanced the cursor would make the
+                    # very same request forever.
+                    log.warning("full_sync - [%s] Member page did not advance, stopping", guild_id)
+                    break
+                after = cursor
 
             stats.members_checked = checked
             stats.currently_repping = repping

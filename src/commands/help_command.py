@@ -8,6 +8,18 @@ from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
 
+# Discord accepts up to 6000 characters in a string option but caps a message
+# body at 2000, so anything echoed back has to be clamped well short of that.
+_MAX_ECHO = 60
+
+
+def sanitize_name(raw: str) -> str:
+    """Make a user-supplied command name safe to quote back at them."""
+    collapsed = " ".join(raw.split())
+    if len(collapsed) > _MAX_ECHO:
+        collapsed = collapsed[:_MAX_ECHO] + "…"
+    return discord.utils.escape_markdown(collapsed) if collapsed else "(blank)"
+
 
 class HelpCommand(Command):
     help_info = CommandHelpInfo(
@@ -24,7 +36,10 @@ class HelpCommand(Command):
     def register(self, tree: app_commands.CommandTree) -> None:
         @tree.command(name="help", description="Get help with bot commands")
         @app_commands.describe(command="Get detailed help for a specific command")
-        async def help_cmd(interaction: discord.Interaction, command: str | None = None) -> None:
+        # Range caps the option at Discord's own command-name length, so
+        # oversized input is rejected before it ever reaches the bot.
+        async def help_cmd(interaction: discord.Interaction,
+                           command: app_commands.Range[str, 1, 32] | None = None) -> None:
             if not await self.guard(interaction):
                 return
             if command:
@@ -36,11 +51,16 @@ class HelpCommand(Command):
         await self._show_all(interaction)
 
     async def _show_specific(self, interaction: discord.Interaction, name: str) -> None:
-        target = next((cmd for cmd in self._all_commands if cmd.name == name.lower()), None)
+        target = next((cmd for cmd in self._all_commands if cmd.name == name.strip().lower()), None)
 
         if target is None:
+            # Clamped, markdown-escaped, and mention-free: the name is raw user
+            # input, so echoing it verbatim is both a ping vector and a way to
+            # push the reply past Discord's 2000-character limit.
             await interaction.response.send_message(
-                f"❌ Command \"{name}\" not found.", ephemeral=True
+                f"❌ Command \"{sanitize_name(name)}\" not found. Run /help to see them all.",
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
 

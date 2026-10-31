@@ -41,14 +41,18 @@ class Bot(discord.Client):
 
     async def _on_tree_error(self, interaction: discord.Interaction, error: Exception) -> None:
         original = getattr(error, "original", error)
-        log.error("tree - Error executing /%s: %s",
-                  getattr(interaction.command, "name", "?"), original)
+        name = getattr(interaction.command, "name", "?")
         if isinstance(original, StoreUnavailable):
+            # An expected outage: one line, no traceback.
+            log.error("tree - /%s could not reach the store: %s", name, original)
             message = ("⚠️ I can't reach my storage right now, so I couldn't do that. "
                        "Nothing was lost; please try again in a minute.")
         elif isinstance(original, StoreError):
+            log.error("tree - /%s was rejected by the store: %s", name, original)
             message = "⚠️ My storage rejected that request. The bot owner has been notified in the logs."
         else:
+            # Unexpected, so keep the traceback: it is the only record of the bug.
+            log.error("tree - Error executing /%s: %s", name, original, exc_info=original)
             message = "❌ An error occurred while executing this command."
         try:
             if interaction.response.is_done():

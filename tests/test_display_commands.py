@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.commands.help_command import HelpCommand
+from src.commands.help_command import HelpCommand, sanitize_name
 from src.commands.leaderboard import LeaderboardCommand
 from src.commands.ping import PingCommand
 from src.commands.repped import ReppedCommand
@@ -90,6 +90,17 @@ async def test_empty_leaderboard(context):
     assert "Nobody" in interaction.response.send_message.await_args.args[0]
 
 
+@pytest.mark.parametrize("sort", ["bogus", "", "CURRENT", "Longest"])
+async def test_leaderboard_falls_back_for_an_unrecognised_sort(context, sort):
+    """streaks.rank() tolerates an unknown sort, so the heading must too."""
+    interaction, _, store = context
+    store.leaderboard.return_value = [("1", 120)]
+    await LeaderboardCommand()._show(interaction, sort)
+    # Heading and ordering have to agree on the sort actually used.
+    store.leaderboard.assert_awaited_once_with("1", sort="current", limit=10)
+    assert "Current Streak" in interaction.response.send_message.await_args.kwargs["embed"].title
+
+
 async def test_help_lists_categories_and_case_insensitive_details(context):
     interaction, _, _ = context
     command = HelpCommand([PingCommand(), ReppedCommand()])
@@ -103,3 +114,45 @@ async def test_help_lists_categories_and_case_insensitive_details(context):
     await command._show_specific(interaction, "missing")
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
     assert "not found" in interaction.response.send_message.await_args.args[0]
+
+
+# --- echoing back an unknown command name -----------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("ping", "ping"),
+    ("  PING  ", "PING"),
+    ("a b   c", "a b c"),
+    ("", "(blank)"),
+    ("   ", "(blank)"),
+    ("**bold**", r"\*\*bold\*\*"),
+    ("_x_", r"\_x\_"),
+])
+def test_sanitize_name_collapses_and_escapes(raw, expected):
+    assert sanitize_name(raw) == expected
+
+
+def test_sanitize_name_clamps_oversized_input():
+    assert sanitize_name("A" * 6000) == "A" * 60 + "…"
+
+
+async def test_help_detail_lookup_tolerates_surrounding_space(context):
+    interaction, _, _ = context
+    await HelpCommand([PingCommand()])._show_specific(interaction, "  Ping ")
+    assert interaction.response.send_message.await_args.kwargs["embed"].title == "📖 Help: /ping"
+
+
+async def test_unknown_command_reply_stays_inside_discords_limit(context):
+    """A string option holds 6000 characters; a message body holds 2000."""
+    interaction, _, _ = context
+    await HelpCommand([PingCommand()])._show_specific(interaction, "A" * 6000)
+    assert len(interaction.response.send_message.await_args.args[0]) < 2000
+
+
+async def test_unknown_command_reply_cannot_ping_or_format(context):
+    interaction, _, _ = context
+    await HelpCommand([PingCommand()])._show_specific(interaction, "@everyone **loud**")
+    sent = interaction.response.send_message.await_args
+    assert r"\*\*loud\*\*" in sent.args[0]
+    mentions = sent.kwargs["allowed_mentions"]
+    assert (mentions.everyone, mentions.users, mentions.roles) == (False, False, False)
+    assert sent.kwargs["ephemeral"] is True
