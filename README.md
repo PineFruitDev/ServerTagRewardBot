@@ -4,6 +4,8 @@ Reward your community for repping your server. This public bot grants a role the
 
 Built on the [PyTemplateBot](https://github.com/PineFruitDev/PyTemplateBot) architecture: command class pattern, single source of truth, discord.py.
 
+**Website:** [bots.modulix.gg/tag-rewards](https://bots.modulix.gg/tag-rewards) · More Discord bots and free tools from Modulix: [bots.modulix.gg](https://bots.modulix.gg/) · [Discord account age checker](https://bots.modulix.gg/tools/account-age)
+
 ## Features
 
 - **Public & Multi-Server**: One hosted bot serves unlimited servers; each configures its own reward
