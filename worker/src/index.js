@@ -154,6 +154,11 @@ async function authorized(request, key) {
 }
 
 function snowflake(value, name) {
+  // Discord IDs usually exceed JavaScript's safe integer range. Require those
+  // IDs as strings so JSON number rounding cannot target a different record.
+  if (typeof value === "number" && !Number.isSafeInteger(value)) {
+    throw new HttpError(400, `invalid ${name}`);
+  }
   const s = typeof value === "number" ? String(value) : value;
   if (typeof s !== "string" || !SNOWFLAKE.test(s)) throw new HttpError(400, `invalid ${name}`);
   return s;

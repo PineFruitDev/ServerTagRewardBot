@@ -10,6 +10,7 @@ raised so commands can show a friendly message instead of a traceback.
 """
 
 import asyncio
+import json
 import os
 import random
 from typing import Any
@@ -81,7 +82,7 @@ class StoreClient:
                     last_error = f"HTTP {resp.status}"
             except StoreError:
                 raise
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
                 last_error = type(exc).__name__
 
             if attempt < self._attempts:
@@ -97,7 +98,7 @@ class StoreClient:
     async def _error_detail(resp: aiohttp.ClientResponse) -> str:
         try:
             data = await resp.json()
-            return str(data.get("error", data))
+            return str(data.get("error", data) if isinstance(data, dict) else data)
         except (aiohttp.ContentTypeError, ValueError):
             return resp.reason or "error"
 

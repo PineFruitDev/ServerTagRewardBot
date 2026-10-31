@@ -28,6 +28,8 @@ class GuildConfig:
         self._client = client or StoreClient.get_instance()
         self._ttl = cache_ttl
         self._cache: dict[str, tuple[float, str | None]] = {}
+        # Successful local writes fence off reads that started before them.
+        self._revisions: dict[str, int] = {}
         GuildConfig._instance = self
         log.info("__init__ - Using remote store")
 
@@ -43,6 +45,7 @@ class GuildConfig:
     async def set_role(self, guild_id: str, role_id: str) -> None:
         guild_id, role_id = str(guild_id), str(role_id)
         await self._client.put(f"/guilds/{guild_id}", {"role_id": role_id})
+        self._revisions[guild_id] = self._revisions.get(guild_id, 0) + 1
         self._remember(guild_id, role_id)
         log.info("set_role - Guild %s now rewards role %s", guild_id, role_id)
 
@@ -52,7 +55,10 @@ class GuildConfig:
         cached = self._cache.get(guild_id)
         if cached is not None and cached[0] > time.monotonic():
             return cached[1]
+        revision = self._revisions.get(guild_id, 0)
         data = await self._client.get(f"/guilds/{guild_id}")
+        if revision != self._revisions.get(guild_id, 0):
+            return await self.get_role(guild_id)
         role_id = data.get("role_id")
         self._remember(guild_id, role_id)
         return role_id
@@ -61,16 +67,19 @@ class GuildConfig:
         """Turn the bot off for a guild. Returns True if it was configured."""
         guild_id = str(guild_id)
         data = await self._client.post(f"/guilds/{guild_id}/disable")
+        self._revisions[guild_id] = self._revisions.get(guild_id, 0) + 1
         self._remember(guild_id, None)
         log.info("disable - Guild %s disabled", guild_id)
         return bool(data.get("was_configured"))
 
     async def all_guilds(self) -> list[tuple[str, str]]:
         """All (guild_id, role_id) pairs with the bot enabled."""
+        revisions = self._revisions.copy()
         data = await self._client.get("/guilds")
         guilds = [(str(g), str(r)) for g, r in data.get("guilds", [])]
         for guild_id, role_id in guilds:
-            self._remember(guild_id, role_id)
+            if revisions.get(guild_id, 0) == self._revisions.get(guild_id, 0):
+                self._remember(guild_id, role_id)
         return guilds
 
     async def count(self) -> int:

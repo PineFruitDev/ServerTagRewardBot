@@ -2,13 +2,18 @@
   "name": "tagbot-store",
   "private": true,
   "description": "Cloudflare Worker + D1 storage API for ServerTagRewardBot",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "migrate:local": "wrangler d1 migrations apply tagbot-db --local",
     "migrate:remote": "wrangler d1 migrations apply tagbot-db --remote"
   },
   "devDependencies": {
+    "miniflare": "5.20261023.3-beta",
     "wrangler": "^4.124.0"
   }
 }
