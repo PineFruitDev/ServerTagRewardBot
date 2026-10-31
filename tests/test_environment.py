@@ -71,3 +71,21 @@ def test_explicit_development_settings(valid_env, monkeypatch):
     assert config.is_development and not config.is_production
     assert config.developer_ids == ["123456789012345678", "987654321098765432"]
     assert config.sync_on_start and config.sync_delay_ms == 0
+
+
+@pytest.mark.parametrize("length,valid", [(16, False), (17, True), (20, True), (21, False)])
+def test_developer_id_length_boundaries(valid_env, monkeypatch, length, valid):
+    monkeypatch.setenv("DEVELOPER_IDS", "1" * length)
+    if valid:
+        Environment.validate()
+        assert Environment.get_config().developer_ids == ["1" * length]
+    else:
+        with pytest.raises(SystemExit, match="DEVELOPER_IDS"):
+            Environment.validate()
+
+
+@pytest.mark.parametrize("raw,expected", [("TRUE", True), ("false", False)])
+def test_startup_sync_parsing(valid_env, monkeypatch, raw, expected):
+    monkeypatch.setenv("SYNC_ON_START", raw)
+    Environment.validate()
+    assert Environment.get_config().sync_on_start is expected
