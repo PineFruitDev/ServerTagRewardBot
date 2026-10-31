@@ -69,7 +69,16 @@ class TagSyncService:
             primary_guild.get("identity_guild_id") == str(guild_id)
 
     async def on_socket_raw_receive(self, msg) -> None:
-        """Raw dispatch hook - fires for every gateway event."""
+        """Raw dispatch hook - fires for every gateway event.
+
+        Never lets one malformed event or transient DB/API error escape.
+        """
+        try:
+            await self._handle_raw(msg)
+        except Exception:
+            log.exception("on_socket_raw_receive - Failed to handle gateway event")
+
+    async def _handle_raw(self, msg) -> None:
         if not isinstance(msg, str):
             return
         try:
@@ -177,10 +186,20 @@ class TagSyncService:
 
         return stats
 
+    async def safe_full_sync(self, guild_id: str) -> None:
+        """full_sync for background tasks: logs failures instead of losing them."""
+        try:
+            await self.full_sync(guild_id)
+        except Exception:
+            log.exception("safe_full_sync - [%s] Full sync failed", guild_id)
+
     async def sync_all_guilds(self) -> None:
         """Reconcile every configured guild, one at a time (startup)."""
         guilds = GuildConfig.get_instance().all_guilds()
         log.info("sync_all_guilds - Syncing %d configured guilds...", len(guilds))
         for guild_id, _role_id in guilds:
-            await self.full_sync(guild_id)
+            try:
+                await self.full_sync(guild_id)
+            except Exception:
+                log.exception("sync_all_guilds - [%s] Full sync failed", guild_id)
         log.info("sync_all_guilds - Done")

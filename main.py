@@ -1,6 +1,7 @@
 """Main entry point for ServerTagRewardBot."""
 
 import asyncio
+import sys
 
 import discord
 from dotenv import load_dotenv
@@ -49,7 +50,18 @@ def main() -> None:
         if config.sync_on_start:  # off by default; initial sync happens in /setup
             asyncio.create_task(tag_sync.sync_all_guilds())
 
-    bot.run(config.discord_token, log_handler=None)
+    try:
+        bot.run(config.discord_token, log_handler=None)
+    except discord.PrivilegedIntentsRequired:
+        log.critical(
+            "main - Discord rejected the connection (close code 4014): the SERVER MEMBERS "
+            "privileged intent is not enabled for this bot. Enable it under Developer Portal > "
+            "Applications > Bot > Privileged Gateway Intents, then restart. Tag sync cannot work without it."
+        )
+        sys.exit(1)
+    except discord.LoginFailure:
+        log.critical("main - Discord rejected DISCORD_TOKEN (invalid or reset). Update .env and restart.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
