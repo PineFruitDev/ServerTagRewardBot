@@ -27,7 +27,7 @@ class SyncPromptView(discord.ui.View):
         await self._finish(interaction, "🔄 Syncing your server tag rewards now. Check /status for progress.")
         service = TagSyncService.get_instance()
         if service is not None and not service.is_syncing(self.guild_id):
-            asyncio.create_task(service.full_sync(self.guild_id))
+            asyncio.create_task(service.safe_full_sync(self.guild_id))
 
     @discord.ui.button(label="Later", style=discord.ButtonStyle.secondary)
     async def later(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
