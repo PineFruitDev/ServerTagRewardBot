@@ -2,8 +2,8 @@
 
 Ensures all required environment variables are present and valid before
 the bot starts, with helpful error messages when they aren't. Per-guild
-settings (reward roles) live in the SQLite store, not here - this bot is
-public and serves any number of servers.
+settings (reward roles) and streaks live in tagbot-store (Cloudflare D1),
+reached via TAGBOT_STORE_URL with the TAGBOT_STORE_KEY bearer secret.
 """
 
 import os
@@ -14,14 +14,23 @@ from src.services.logger import get_logger
 
 log = get_logger("Environment")
 
-REQUIRED_VARS = ("DISCORD_TOKEN",)
+REQUIRED_VARS = ("DISCORD_TOKEN", "TAGBOT_STORE_URL", "TAGBOT_STORE_KEY")
+
+# Plain http is only allowed for a local `wrangler dev` store
+_LOCAL_HTTP = re.compile(r"^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)")
 
 OPTIONAL_VARS = {
     "ENVIRONMENT": "production",
     "DEVELOPER_IDS": "",
     "SYNC_ON_START": "false",
     "SYNC_DELAY_MS": "350",
+    # Request the Server Members privileged intent. If Discord refuses it, the
+    # bot falls back to limited mode anyway; set false to skip the attempt.
+    "MEMBERS_INTENT": "true",
 }
+
+_BOOL_TRUE = ("true", "1", "yes", "on")
+_BOOL_FALSE = ("false", "0", "no", "off")
 
 _SNOWFLAKE = re.compile(r"^\d{17,20}$")
 
@@ -32,6 +41,7 @@ class Config:
     environment: str
     sync_on_start: bool
     sync_delay_ms: int
+    members_intent: bool = True
     developer_ids: list[str] = field(default_factory=list)
 
     @property
@@ -63,6 +73,10 @@ class Environment:
                 continue
             if name == "DISCORD_TOKEN" and not cls._is_valid_token(value):
                 invalid.append(f"{name} (invalid format)")
+            if name == "TAGBOT_STORE_URL" and not (value.startswith("https://") or _LOCAL_HTTP.match(value)):
+                invalid.append(f"{name} (must be https://)")
+            if name == "TAGBOT_STORE_KEY" and len(value) < 32:
+                invalid.append(f"{name} (too short)")
 
         for name, default in OPTIONAL_VARS.items():
             if not os.getenv(name):
@@ -72,6 +86,9 @@ class Environment:
         for dev_id in cls._split_ids(os.getenv("DEVELOPER_IDS", "")):
             if not _SNOWFLAKE.match(dev_id):
                 invalid.append(f"DEVELOPER_IDS contains invalid ID: {dev_id}")
+
+        if os.getenv("MEMBERS_INTENT", "true").strip().lower() not in _BOOL_TRUE + _BOOL_FALSE:
+            invalid.append("MEMBERS_INTENT (must be true or false)")
 
         if not os.getenv("SYNC_DELAY_MS", "350").isdigit():
             invalid.append("SYNC_DELAY_MS (must be a non-negative number)")
@@ -95,6 +112,7 @@ class Environment:
                 environment=os.getenv("ENVIRONMENT", "production"),
                 sync_on_start=os.getenv("SYNC_ON_START", "true").lower() == "true",
                 sync_delay_ms=int(os.getenv("SYNC_DELAY_MS", "350")),
+                members_intent=os.getenv("MEMBERS_INTENT", "true").strip().lower() in _BOOL_TRUE,
                 developer_ids=cls._split_ids(os.getenv("DEVELOPER_IDS", "")),
             )
         return cls._config

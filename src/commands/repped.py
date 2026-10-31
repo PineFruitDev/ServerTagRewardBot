@@ -33,18 +33,18 @@ class ReppedCommand(Command):
     async def _show(self, interaction: discord.Interaction, member: discord.Member) -> None:
         guild_id = str(interaction.guild_id)
 
-        if GuildConfig.get_instance().get_role(guild_id) is None:
+        if await GuildConfig.get_instance().get_role(guild_id) is None:
             await interaction.response.send_message(
                 "ℹ️ This server isn't set up yet. An admin can run /setup role:@Role to get started.",
                 ephemeral=True,
             )
             return
 
-        stats = StreakStore.get_instance().get(guild_id, str(member.id))
-
         if member.bot:
             await interaction.response.send_message("🤖 Bots don't rep tags. Yet.", ephemeral=True)
             return
+
+        stats = await StreakStore.get_instance().get(guild_id, str(member.id))
 
         title = "🏷️ Tag Streak"
         if stats["active"]:

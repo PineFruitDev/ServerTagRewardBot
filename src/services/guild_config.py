@@ -1,41 +1,35 @@
 """Per-guild configuration store.
 
 The bot is public and serves any number of servers, so each guild's reward
-role lives in a small SQLite database next to the bot (data.db). Admins set
-it with /setup; everything else reads from here.
+role lives in tagbot-store (Cloudflare D1, encrypted at rest), not on the bot
+host. Admins set it with /setup; everything else reads from here.
+
+get_role runs on every member update the bot sees, so results are cached
+briefly. This process is the only writer, so local writes update the cache
+immediately.
 """
 
-import sqlite3
-import threading
+import time
 
 from src.services.logger import get_logger
+from src.services.store_client import StoreClient
 
 log = get_logger("GuildConfig")
 
-_DB_PATH = "data.db"
+_CACHE_TTL = 60.0
 
 
 class GuildConfig:
-    """Thread-safe SQLite store mapping guild_id -> reward role."""
+    """Remote store mapping guild_id -> reward role, with a short read cache."""
 
     _instance: "GuildConfig | None" = None
 
-    def __init__(self, db_path: str = _DB_PATH):
-        self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS guild_config (
-                guild_id TEXT PRIMARY KEY,
-                role_id TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                updated_at TEXT DEFAULT (datetime('now'))
-            )
-            """
-        )
-        self._conn.commit()
+    def __init__(self, client: StoreClient | None = None, cache_ttl: float = _CACHE_TTL):
+        self._client = client or StoreClient.get_instance()
+        self._ttl = cache_ttl
+        self._cache: dict[str, tuple[float, str | None]] = {}
         GuildConfig._instance = self
-        log.info("__init__ - Store ready (%s), %d guilds configured", db_path, self.count())
+        log.info("__init__ - Using remote store")
 
     @classmethod
     def get_instance(cls) -> "GuildConfig":
@@ -43,53 +37,41 @@ class GuildConfig:
             cls._instance = GuildConfig()
         return cls._instance
 
-    def set_role(self, guild_id: str, role_id: str) -> None:
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO guild_config (guild_id, role_id, enabled)
-                VALUES (?, ?, 1)
-                ON CONFLICT(guild_id) DO UPDATE SET
-                    role_id = excluded.role_id,
-                    enabled = 1,
-                    updated_at = datetime('now')
-                """,
-                (str(guild_id), str(role_id)),
-            )
-            self._conn.commit()
+    def _remember(self, guild_id: str, role_id: str | None) -> None:
+        self._cache[guild_id] = (time.monotonic() + self._ttl, role_id)
+
+    async def set_role(self, guild_id: str, role_id: str) -> None:
+        guild_id, role_id = str(guild_id), str(role_id)
+        await self._client.put(f"/guilds/{guild_id}", {"role_id": role_id})
+        self._remember(guild_id, role_id)
         log.info("set_role - Guild %s now rewards role %s", guild_id, role_id)
 
-    def get_role(self, guild_id: str) -> str | None:
+    async def get_role(self, guild_id: str) -> str | None:
         """Return the reward role for a guild, or None if unconfigured/disabled."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT role_id FROM guild_config WHERE guild_id = ? AND enabled = 1",
-                (str(guild_id),),
-            ).fetchone()
-        return row[0] if row else None
+        guild_id = str(guild_id)
+        cached = self._cache.get(guild_id)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1]
+        data = await self._client.get(f"/guilds/{guild_id}")
+        role_id = data.get("role_id")
+        self._remember(guild_id, role_id)
+        return role_id
 
-    def disable(self, guild_id: str) -> bool:
+    async def disable(self, guild_id: str) -> bool:
         """Turn the bot off for a guild. Returns True if it was configured."""
-        with self._lock:
-            cursor = self._conn.execute(
-                "UPDATE guild_config SET enabled = 0, updated_at = datetime('now') WHERE guild_id = ?",
-                (str(guild_id),),
-            )
-            self._conn.commit()
+        guild_id = str(guild_id)
+        data = await self._client.post(f"/guilds/{guild_id}/disable")
+        self._remember(guild_id, None)
         log.info("disable - Guild %s disabled", guild_id)
-        return cursor.rowcount > 0
+        return bool(data.get("was_configured"))
 
-    def all_guilds(self) -> list[tuple[str, str]]:
+    async def all_guilds(self) -> list[tuple[str, str]]:
         """All (guild_id, role_id) pairs with the bot enabled."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT guild_id, role_id FROM guild_config WHERE enabled = 1"
-            ).fetchall()
-        return [(row[0], row[1]) for row in rows]
+        data = await self._client.get("/guilds")
+        guilds = [(str(g), str(r)) for g, r in data.get("guilds", [])]
+        for guild_id, role_id in guilds:
+            self._remember(guild_id, role_id)
+        return guilds
 
-    def count(self) -> int:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM guild_config WHERE enabled = 1"
-            ).fetchone()
-        return row[0]
+    async def count(self) -> int:
+        return len(await self.all_guilds())

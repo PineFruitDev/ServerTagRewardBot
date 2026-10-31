@@ -7,7 +7,7 @@ from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
 from src.services.guild_config import GuildConfig
-from src.services.tag_sync import TagSyncService
+from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 
 
 class SyncPromptView(discord.ui.View):
@@ -24,9 +24,12 @@ class SyncPromptView(discord.ui.View):
 
     @discord.ui.button(label="Sync now", style=discord.ButtonStyle.primary, emoji="🔄")
     async def sync_now(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self._finish(interaction, "🔄 Syncing your server tag rewards now. Check /status for progress.")
         service = TagSyncService.get_instance()
-        if service is not None and not service.is_syncing(self.guild_id):
+        if service is None:
+            await self._finish(interaction, f"✅ Saved. {SYNC_PAUSED_MESSAGE}")
+            return
+        await self._finish(interaction, "🔄 Syncing your server tag rewards now. Check /status for progress.")
+        if not service.is_syncing(self.guild_id):
             asyncio.create_task(service.safe_full_sync(self.guild_id))
 
     @discord.ui.button(label="Later", style=discord.ButtonStyle.secondary)
@@ -63,7 +66,7 @@ class SetupCommand(Command):
         async def disable(interaction: discord.Interaction) -> None:
             if not await self.guard(interaction):
                 return
-            was_configured = GuildConfig.get_instance().disable(str(interaction.guild_id))
+            was_configured = await GuildConfig.get_instance().disable(str(interaction.guild_id))
             message = (
                 "🛑 Tag rewards disabled for this server. Existing roles are left as they are; run /setup to turn it back on."
                 if was_configured else
@@ -91,7 +94,7 @@ class SetupCommand(Command):
             )
             return
 
-        GuildConfig.get_instance().set_role(str(guild.id), str(role.id))
+        await GuildConfig.get_instance().set_role(str(guild.id), str(role.id))
 
         await interaction.response.send_message(
             f"✅ Set up! Members repping this server's tag now receive {role.mention}.\n\n"

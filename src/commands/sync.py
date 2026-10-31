@@ -5,7 +5,7 @@ from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
 from src.services.guild_config import GuildConfig
-from src.services.tag_sync import TagSyncService
+from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 
 
 class SyncCommand(Command):
@@ -31,7 +31,7 @@ class SyncCommand(Command):
     async def execute(self, interaction: discord.Interaction) -> None:
         guild_id = str(interaction.guild_id)
 
-        if GuildConfig.get_instance().get_role(guild_id) is None:
+        if await GuildConfig.get_instance().get_role(guild_id) is None:
             await interaction.response.send_message(
                 "ℹ️ This server isn't set up yet. Run /setup role:@Role first.", ephemeral=True
             )
@@ -39,7 +39,7 @@ class SyncCommand(Command):
 
         service = TagSyncService.get_instance()
         if service is None:
-            await interaction.response.send_message("❌ Tag sync service is not running.", ephemeral=True)
+            await interaction.response.send_message(SYNC_PAUSED_MESSAGE, ephemeral=True)
             return
 
         if service.is_syncing(guild_id):

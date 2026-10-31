@@ -1,0 +1,18 @@
+# tagbot-store: the bot's only persistent storage (Cloudflare D1, encrypted at rest).
+# Deploy:   cd worker && CLOUDFLARE_ACCOUNT_ID=d29c165dc122e81cbe866125a1ee54c9 npx wrangler deploy
+# Migrate:  npx wrangler d1 migrations apply tagbot-db --remote
+# Secret:   npx wrangler secret put TAGBOT_STORE_KEY   (never commit it)
+name = "tagbot-store"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+account_id = "d29c165dc122e81cbe866125a1ee54c9"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tagbot-db"
+database_id = "00d2b130-1d08-4748-a1ec-3b4ff01c67fa"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true

@@ -47,14 +47,14 @@ class LeaderboardCommand(Command):
     async def _show(self, interaction: discord.Interaction, sort: str) -> None:
         guild_id = str(interaction.guild_id)
 
-        if GuildConfig.get_instance().get_role(guild_id) is None:
+        if await GuildConfig.get_instance().get_role(guild_id) is None:
             await interaction.response.send_message(
                 "ℹ️ This server isn't set up yet. An admin can run /setup role:@Role to get started.",
                 ephemeral=True,
             )
             return
 
-        top = StreakStore.get_instance().leaderboard(guild_id, sort=sort, limit=10)
+        top = await StreakStore.get_instance().leaderboard(guild_id, sort=sort, limit=10)
 
         if not top:
             await interaction.response.send_message(

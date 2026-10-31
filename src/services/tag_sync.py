@@ -18,9 +18,16 @@ import discord
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.logger import get_logger
+from src.services.store_client import StoreError
 from src.services.streaks import StreakStore
 
 log = get_logger("TagSyncService")
+
+# Shown by commands when the bot runs without the Server Members intent
+SYNC_PAUSED_MESSAGE = (
+    "⏸️ Live tag sync is paused while Discord reviews this bot's Server Members intent. "
+    "Your settings and streaks are safe; roles will catch up once sync resumes."
+)
 
 
 @dataclass
@@ -50,7 +57,13 @@ class TagSyncService:
 
     @classmethod
     def get_instance(cls) -> "TagSyncService | None":
+        """The running service, or None in limited mode (no members intent)."""
         return cls._instance
+
+    @classmethod
+    def detach(cls) -> None:
+        """Turn tag sync off (limited mode)."""
+        cls._instance = None
 
     def stats_for(self, guild_id: str) -> GuildStats:
         return self._stats.setdefault(str(guild_id), GuildStats())
@@ -71,7 +84,7 @@ class TagSyncService:
     async def on_socket_raw_receive(self, msg) -> None:
         """Raw dispatch hook - fires for every gateway event.
 
-        Never lets one malformed event or transient DB/API error escape.
+        Never lets one malformed event or transient store/API error escape.
         """
         try:
             await self._handle_raw(msg)
@@ -96,7 +109,7 @@ class TagSyncService:
             return
 
         # Only act in guilds an admin has configured
-        role_id = GuildConfig.get_instance().get_role(guild_id)
+        role_id = await GuildConfig.get_instance().get_role(guild_id)
         if role_id is None:
             return
 
@@ -104,11 +117,22 @@ class TagSyncService:
         repping = self.is_repping(user, guild_id)
         if event == "GUILD_MEMBER_UPDATE":
             self.stats_for(guild_id).live_updates += 1
-            StreakStore.get_instance().mark(guild_id, user["id"], repping)
             await self.apply_role(guild_id, role_id, user["id"], repping, data.get("roles"))
+            await self._record_streaks(guild_id, [(user["id"], repping)])
         elif repping:
-            StreakStore.get_instance().mark(guild_id, user["id"], True)
             await self.apply_role(guild_id, role_id, user["id"], True, data.get("roles"))
+            await self._record_streaks(guild_id, [(user["id"], True)])
+
+    @staticmethod
+    async def _record_streaks(guild_id: str, marks: list[tuple[str, bool]]) -> None:
+        """Update streaks; a store outage is logged but never blocks role updates."""
+        if not marks:
+            return
+        try:
+            await StreakStore.get_instance().mark_many(guild_id, marks)
+        except StoreError as exc:
+            log.warning("_record_streaks - [%s] Could not record %d streak update(s): %s",
+                        guild_id, len(marks), exc)
 
     async def apply_role(self, guild_id: str, role_id: str, user_id: str,
                          should_have: bool, current_roles=None) -> None:
@@ -139,7 +163,7 @@ class TagSyncService:
         guild_id = str(guild_id)
         stats = self.stats_for(guild_id)
 
-        role_id = GuildConfig.get_instance().get_role(guild_id)
+        role_id = await GuildConfig.get_instance().get_role(guild_id)
         if role_id is None:
             return stats
 
@@ -152,6 +176,7 @@ class TagSyncService:
             log.info("full_sync - [%s] Starting full member sync...", guild_id)
             checked = repping = 0
             after = 0
+            marks: list[tuple[str, bool]] = []
 
             while True:
                 batch = await self._client.http.get_members(int(guild_id), limit=1000, after=after)
@@ -173,8 +198,12 @@ class TagSyncService:
                     should_have = self.is_repping(user, guild_id)
                     if should_have:
                         repping += 1
-                    StreakStore.get_instance().mark(guild_id, user["id"], should_have)
+                    marks.append((user["id"], should_have))
                     await self.apply_role(guild_id, role_id, user["id"], should_have, member.get("roles"))
+
+                # Batched: one store request per 50 members instead of one each
+                await self._record_streaks(guild_id, marks)
+                marks = []
 
                 if len(batch) < 1000:
                     break
@@ -195,7 +224,11 @@ class TagSyncService:
 
     async def sync_all_guilds(self) -> None:
         """Reconcile every configured guild, one at a time (startup)."""
-        guilds = GuildConfig.get_instance().all_guilds()
+        try:
+            guilds = await GuildConfig.get_instance().all_guilds()
+        except StoreError as exc:
+            log.error("sync_all_guilds - Could not load configured guilds: %s", exc)
+            return
         log.info("sync_all_guilds - Syncing %d configured guilds...", len(guilds))
         for guild_id, _role_id in guilds:
             try:

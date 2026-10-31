@@ -5,7 +5,7 @@ from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
 from src.services.guild_config import GuildConfig
-from src.services.tag_sync import TagSyncService
+from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 
 
 class StatusCommand(Command):
@@ -28,7 +28,7 @@ class StatusCommand(Command):
 
     async def execute(self, interaction: discord.Interaction) -> None:
         guild_id = str(interaction.guild_id)
-        role_id = GuildConfig.get_instance().get_role(guild_id)
+        role_id = await GuildConfig.get_instance().get_role(guild_id)
 
         if role_id is None:
             await interaction.response.send_message(
@@ -39,7 +39,9 @@ class StatusCommand(Command):
 
         service = TagSyncService.get_instance()
         if service is None:
-            await interaction.response.send_message("❌ Tag sync service is not running.", ephemeral=True)
+            await interaction.response.send_message(
+                f"🎁 Reward role: <@&{role_id}>\n{SYNC_PAUSED_MESSAGE}", ephemeral=True
+            )
             return
 
         stats = service.stats_for(guild_id)
