@@ -143,16 +143,31 @@ then run both suites from the repository root:
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest -q --cov=src.services --cov-branch --cov-report=term-missing --cov-fail-under=90
+python -m ruff check .
+python -m mypy
+python -m pytest -q --cov=src --cov=scripts --cov-branch --cov-report=term-missing --cov-fail-under=93
 npm --prefix worker ci
 npm --prefix worker test
 ```
 
 The Python suite covers tag detection, role reconciliation, pagination and sync
-failures, command guards, configuration, storage retries and caching, and streak
-math. Discord calls are mocked; HTTP client tests use a loopback server. Pytest
-blocks non-loopback connections, ignores `.env`, and isolates configuration and
-service singletons between tests. No Discord or Cloudflare credentials are needed.
+failures, slash command wiring and guards, the post-setup sync prompt,
+configuration, storage retries and caching, streak math, and the one-time
+SQLite-to-D1 migration. Discord calls are mocked; HTTP client tests use a
+loopback server. Pytest blocks non-loopback connections, ignores `.env`, and
+isolates configuration and service singletons between tests. No Discord or
+Cloudflare credentials are needed.
+
+`mypy.ini` holds the typecheck scope. It checks every production module, and
+baselines a single error code per module where discord.py's own annotations
+disagree with its runtime payloads, so every other error stays enforced
+everywhere. Tests are not typechecked.
+
+The migration tests replay the script's generated SQL onto a database built
+from `worker/migrations/0001_initial.sql`, so the generated statements and the
+real schema cannot drift apart. The write path of `scripts/smoke_test.py` is
+only exercised against a real `wrangler dev` store, as documented in that
+script; faking it in Python would duplicate the Worker and prove nothing.
 
 The Worker suite uses Node's test runner and [Miniflare's local D1 runtime](https://developers.cloudflare.com/d1/best-practices/local-development/#test-programmatically).
 It applies the checked-in migration to temporary databases and tests the actual
@@ -160,10 +175,12 @@ HTTP routes and SQL for authorization, validation, guild configuration, streak
 transitions, and guild isolation. It does not use `wrangler.toml`, remote D1, or
 deployment commands. Dependencies must be installed before running offline.
 
-GitHub Actions runs Python tests on 3.12 and 3.13 with a 90% branch-inclusive
-coverage floor for `src/services`, plus the Worker suite on Node.js 22, for pull
-requests and pushes to `main`. This verifies local behavior, not a live Discord
-connection or production deployment.
+GitHub Actions runs Python tests on 3.12 and 3.13 with a 93% branch-inclusive
+coverage floor across `src` and `scripts`, a typecheck job, and the Worker suite
+on Node.js 22, for pull requests and pushes to `main`. Workflow permissions are
+read-only, actions are pinned to full commit SHAs, checkout does not persist
+credentials, and superseded pull request runs are cancelled. This verifies local
+behavior, not a live Discord connection or production deployment.
 
 ### Submitting changes
 
