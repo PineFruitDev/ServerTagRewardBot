@@ -1,6 +1,12 @@
 """GuildConfig / StreakStore against a fake client (no network)."""
 
+import asyncio
+from unittest.mock import AsyncMock
+
+import pytest
+
 from src.services.guild_config import GuildConfig
+from src.services.store_client import StoreUnavailable
 from src.services.streaks import MARK_BATCH, StreakStore, humanize, rank, summarize
 
 
@@ -89,3 +95,92 @@ def test_helpers():
     assert humanize(30) == "less than a minute"
     assert humanize(90061) == "1d 1h"
     assert humanize(3720) == "1h 2m"
+
+
+@pytest.mark.parametrize("operation", ["set_role", "disable"])
+async def test_failed_write_preserves_last_known_configuration(operation):
+    client = FakeClient({("GET", "/guilds/1"): {"role_id": "10"}})
+    cfg = GuildConfig(client)
+    assert await cfg.get_role("1") == "10"
+    client.put = client.post = AsyncMock(side_effect=StoreUnavailable("offline"))
+    with pytest.raises(StoreUnavailable):
+        if operation == "set_role":
+            await cfg.set_role("1", "11")
+        else:
+            await cfg.disable("1")
+    assert await cfg.get_role("1") == "10"
+
+
+@pytest.mark.parametrize("operation,expected", [("set_role", "11"), ("disable", None)])
+@pytest.mark.parametrize("read_method", ["get_role", "all_guilds"])
+async def test_delayed_read_cannot_overwrite_newer_configuration(operation, expected, read_method):
+    entered, release = asyncio.Event(), asyncio.Event()
+    client = FakeClient()
+
+    async def delayed_get(path):
+        entered.set()
+        await release.wait()
+        return {"role_id": "10"} if path == "/guilds/1" else {"guilds": [["1", "10"]]}
+
+    client.get = delayed_get
+    cfg = GuildConfig(client)
+    pending = asyncio.create_task(cfg.get_role("1") if read_method == "get_role" else cfg.all_guilds())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        if operation == "set_role":
+            await cfg.set_role("1", "11")
+        else:
+            await cfg.disable("1")
+    finally:
+        release.set()
+        result = await pending
+    if read_method == "get_role":
+        assert result == expected
+    assert await cfg.get_role("1") == expected
+
+
+async def test_missing_configuration_is_cached_per_guild():
+    client = FakeClient({("GET", "/guilds/2"): {"role_id": "20"}})
+    cfg = GuildConfig(client)
+    assert await cfg.get_role("1") is None
+    assert await cfg.get_role(1) is None
+    assert await cfg.get_role("2") == "20"
+    assert len(client.calls) == 2
+
+
+@pytest.mark.parametrize("count", [0, 1, 50, 51, 100, 101])
+async def test_mark_batches_preserve_every_member_and_timestamp(count):
+    client = FakeClient()
+    store = StreakStore(client)
+    marks = [(str(i), bool(i % 2)) for i in range(count)]
+    await store.mark_many("1", marks, now=1000)
+    flattened = [mark for _, _, body in client.calls for mark in body["marks"]]
+    assert flattened == [{"user_id": uid, "repping": rep} for uid, rep in marks]
+    assert all(1 <= len(body["marks"]) <= 50 and body["now"] == 1000 for _, _, body in client.calls)
+    assert len(client.calls) == (count + 49) // 50
+
+
+async def test_mark_delegates_single_member_and_stops_on_failed_batch():
+    client = FakeClient()
+    store = StreakStore(client)
+    await store.mark("1", "42", True, now=1000)
+    assert client.calls == [("POST", "/streaks/1/mark", {
+        "now": 1000, "marks": [{"user_id": "42", "repping": True}],
+    })]
+    client.post = AsyncMock(side_effect=StoreUnavailable("offline"))
+    with pytest.raises(StoreUnavailable):
+        await store.mark_many("1", [(str(i), True) for i in range(101)], now=1000)
+    assert client.post.await_count == 1
+
+
+def test_future_streak_time_cannot_produce_negative_totals():
+    assert summarize({"active_since": 200, "total_seconds": 20, "longest_seconds": 10}, 100) == {
+        "current": 0, "longest": 10, "total": 20, "active": True,
+    }
+
+
+def test_leaderboard_excludes_zero_scores_and_honors_limit():
+    rows = [{"user_id": str(i), "total_seconds": i} for i in range(4)]
+    assert rank(rows, "total", 2, 1000) == [("3", 3), ("2", 2)]
+    assert rank(rows, "current", 2, 1000) == []
+    assert rank(rows, "total", 0, 1000) == []

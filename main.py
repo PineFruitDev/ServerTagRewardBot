@@ -35,14 +35,17 @@ def build_bot(config: Config, members: bool) -> Bot:
     if tag_sync is None:
         TagSyncService.detach()
 
+    commands_sync_lock = asyncio.Lock()
+
     @bot.event
     async def on_ready() -> None:
         mode = "LIMITED (no Server Members intent; tag sync off)" if bot.limited_mode else "FULL (tag sync on)"
         log.info("on_ready - Logged in as %s across %d guilds, mode: %s", bot.user, len(bot.guilds), mode)
         # Hosted mode: make sure slash commands are registered, then reconcile
-        if not getattr(bot, "_commands_synced", False):
-            bot._commands_synced = True
-            await bot.sync_commands()
+        async with commands_sync_lock:
+            if not getattr(bot, "_commands_synced", False):
+                await bot.sync_commands()
+                bot._commands_synced = True
         try:
             log.info("on_ready - Store reachable, %d guilds configured", await GuildConfig.get_instance().count())
         except StoreError as exc:

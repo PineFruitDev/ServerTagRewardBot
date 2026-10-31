@@ -2,6 +2,8 @@
 
 Reward your community for repping your server. This public bot grants a role the moment a member equips your server's tag and removes it when they stop, keeping tag adoption and role perks perfectly in sync. Invite it, run `/setup`, done.
 
+[Visit Tag Rewards on Modulix](https://bots.modulix.gg/tag-rewards) for the hosted bot.
+
 Built on the [PyTemplateBot](https://github.com/PineFruitDev/PyTemplateBot) architecture: command class pattern, single source of truth, discord.py.
 
 **Website:** [bots.modulix.gg/tag-rewards](https://bots.modulix.gg/tag-rewards) · More Discord bots and free tools from Modulix: [bots.modulix.gg](https://bots.modulix.gg/) · [Discord account age checker](https://bots.modulix.gg/tools/account-age)
@@ -133,6 +135,37 @@ This project is licensed under **[Apache 2.0](https://choosealicense.com/license
 In short: run the bot for whatever community you want, just do not resell the bot itself. See [LICENSE](LICENSE) for the full terms.
 
 ## Contributing
+
+### Running tests
+
+Use Python 3.12 or 3.13 and Node.js 22. Install the development dependencies,
+then run both suites from the repository root:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q --cov=src.services --cov-branch --cov-report=term-missing --cov-fail-under=90
+npm --prefix worker ci
+npm --prefix worker test
+```
+
+The Python suite covers tag detection, role reconciliation, pagination and sync
+failures, command guards, configuration, storage retries and caching, and streak
+math. Discord calls are mocked; HTTP client tests use a loopback server. Pytest
+blocks non-loopback connections, ignores `.env`, and isolates configuration and
+service singletons between tests. No Discord or Cloudflare credentials are needed.
+
+The Worker suite uses Node's test runner and [Miniflare's local D1 runtime](https://developers.cloudflare.com/d1/best-practices/local-development/#test-programmatically).
+It applies the checked-in migration to temporary databases and tests the actual
+HTTP routes and SQL for authorization, validation, guild configuration, streak
+transitions, and guild isolation. It does not use `wrangler.toml`, remote D1, or
+deployment commands. Dependencies must be installed before running offline.
+
+GitHub Actions runs Python tests on 3.12 and 3.13 with a 90% branch-inclusive
+coverage floor for `src/services`, plus the Worker suite on Node.js 22, for pull
+requests and pushes to `main`. This verifies local behavior, not a live Discord
+connection or production deployment.
+
+### Submitting changes
 
 1. Fork the repository
 2. Create your feature branch

@@ -1,3 +1,5 @@
 -r requirements.txt
 pytest>=8
-pytest-asyncio>=0.23
+pytest-asyncio>=0.24
+pytest-cov>=6
+pytest-socket>=0.7
