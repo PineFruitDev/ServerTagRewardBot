@@ -12,7 +12,7 @@ from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreUnavailable
 from src.services.streaks import StreakStore
-from src.services.tag_sync import TagSyncService
+from src.services.tag_sync import TagSyncService, snowflake
 
 
 def user(uid="42", guild="1", enabled=True):
@@ -45,9 +45,21 @@ def sync(monkeypatch):
     ({}, False), ({"primary_guild": None}, False),
     (user(), True), (user(enabled=False), False), (user(guild="2"), False),
     ({"primary_guild": {"identity_enabled": True}}, False),
+    # primary_guild is whatever the gateway sent, not necessarily an object.
+    ({"primary_guild": "enabled"}, False), ({"primary_guild": []}, False),
+    ({"primary_guild": 1}, False),
 ])
 def test_tag_must_be_enabled_for_this_guild(payload, expected):
     assert TagSyncService.is_repping(payload, "1") is expected
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("42", "42"), ("0", "0"), (42, "42"), (0, "0"),
+    ("", None), ("12a", None), ("-1", None), (-1, None), ("1" * 21, None),
+    (None, None), (True, None), (False, None), (1.5, None), (["1"], None),
+])
+def test_snowflake_accepts_only_discord_ids(value, expected):
+    assert snowflake(value) == expected
 
 
 @pytest.mark.parametrize("should_have,roles,action", [
@@ -111,6 +123,47 @@ async def test_malformed_or_irrelevant_events_cannot_change_roles(sync, payload)
     sync.streaks.mark_many.assert_not_awaited()
 
 
+@pytest.mark.parametrize("payload", [
+    "[]", "3", '"text"',
+    '{"t":"GUILD_MEMBER_UPDATE","d":[]}',
+    '{"t":"GUILD_MEMBER_UPDATE","d":{"guild_id":"1","user":null}}',
+    '{"t":"GUILD_MEMBER_UPDATE","d":{"guild_id":"1","user":"nope"}}',
+    '{"t":"GUILD_MEMBER_UPDATE","d":{"guild_id":"1","user":{}}}',
+    '{"t":"GUILD_MEMBER_UPDATE","d":{"guild_id":"1","user":{"id":null}}}',
+    '{"t":"GUILD_MEMBER_UPDATE","d":{"guild_id":"1","user":{"id":"not-an-id"}}}',
+    '{"t":"GUILD_MEMBER_UPDATE","d":{"guild_id":"oops","user":{"id":"42"}}}',
+    '{"t":"GUILD_MEMBER_ADD","d":{"guild_id":"1","user":{"id":{}}}}',
+])
+async def test_malformed_events_are_dropped_before_any_work(sync, payload):
+    """A bad payload must be rejected on shape, not by raising.
+
+    _handle_raw is called directly so the blanket except in
+    on_socket_raw_receive cannot mask an exception, and the store must not be
+    consulted at all: a malformed event should cost no round trip.
+    """
+    await sync.service._handle_raw(payload)
+    sync.config.get_role.assert_not_awaited()
+    sync.http.add_role.assert_not_awaited()
+    sync.http.remove_role.assert_not_awaited()
+    sync.streaks.mark_many.assert_not_awaited()
+
+
+@pytest.mark.parametrize("guild_id,role_id,user_id", [
+    ("1", "<@&10>", "42"),  # a role mention saved instead of a bare id
+    ("1", "", "42"),
+    ("1", None, "42"),
+    ("1", "10", "oops"),
+    ("nope", "10", "42"),
+])
+async def test_role_changes_reject_unusable_ids(sync, guild_id, role_id, user_id):
+    """One corrupt id must not raise out of apply_role on every member update."""
+    await sync.service.apply_role(guild_id, role_id, user_id, True)
+    sync.http.add_role.assert_not_awaited()
+    sync.http.remove_role.assert_not_awaited()
+    stats = sync.service.stats_for(guild_id)
+    assert (stats.roles_added, stats.roles_removed) == (0, 0)
+
+
 async def test_unconfigured_guild_ignores_gateway_and_full_sync(sync):
     sync.config.get_role.return_value = None
     await sync.service.on_socket_raw_receive(json.dumps({
@@ -165,6 +218,41 @@ async def test_full_sync_paginates_without_losing_members(sync, member_count):
     assert (stats.members_checked, stats.currently_repping) == (member_count, member_count)
     assert stats.last_sync_at is not None
     sync.http.add_role.assert_not_awaited()
+
+
+async def test_full_sync_skips_unusable_rows_and_finishes_the_guild(sync):
+    """A member the payload cannot identify must not abandon the whole sync."""
+    sync.http.get_members.return_value = [
+        {"user": user("1"), "roles": []},
+        {"user": None},                 # no user object
+        {"user": {"id": None}},         # no id
+        {"user": {"id": "oops"}},       # not an id
+        {},                             # no user key at all
+        "not-a-member",                 # not even an object
+        {"user": user("2"), "roles": []},
+    ]
+    stats = await sync.service.full_sync("1")
+    assert sync.http.add_role.await_args_list == [call(1, 1, 10), call(1, 2, 10)]
+    sync.streaks.mark_many.assert_awaited_once_with("1", [("1", True), ("2", True)])
+    assert (stats.members_checked, stats.currently_repping) == (2, 2)
+
+
+async def test_full_sync_stops_when_a_whole_page_cannot_advance(sync):
+    """A full page of unusable rows must not be re-requested forever."""
+    sync.http.get_members.return_value = [{"user": {"id": "oops"}}] * 1000
+    stats = await sync.service.full_sync("1")
+    sync.http.get_members.assert_awaited_once_with(1, limit=1000, after=0)
+    assert stats.members_checked == 0
+
+
+async def test_full_sync_skips_a_member_whose_refetch_is_unusable(sync, monkeypatch):
+    sync.http.get_members.return_value = [{"user": {"id": "7"}, "roles": []}]
+    sync.http.get_user.return_value = None
+    monkeypatch.setattr("src.services.tag_sync.asyncio.sleep", AsyncMock())
+    stats = await sync.service.full_sync("1")
+    sync.http.add_role.assert_not_awaited()
+    sync.streaks.mark_many.assert_not_awaited()
+    assert (stats.members_checked, stats.currently_repping) == (1, 0)
 
 
 async def test_streak_outage_does_not_block_role_reconciliation(sync):

@@ -15,6 +15,8 @@ _SORT_LABELS = {
     "total": "All-Time Repped",
 }
 
+_DEFAULT_SORT = "current"
+
 
 class LeaderboardCommand(Command):
     help_info = CommandHelpInfo(
@@ -46,6 +48,12 @@ class LeaderboardCommand(Command):
 
     async def _show(self, interaction: discord.Interaction, sort: str) -> None:
         guild_id = str(interaction.guild_id)
+
+        # streaks.rank() already falls back for an unrecognised sort; normalize
+        # here too so the heading lookup cannot raise KeyError, and so the
+        # heading always describes the ordering actually used.
+        if sort not in _SORT_LABELS:
+            sort = _DEFAULT_SORT
 
         if await GuildConfig.get_instance().get_role(guild_id) is None:
             await interaction.response.send_message(

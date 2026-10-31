@@ -1,13 +1,12 @@
 """Setup command - walks an admin through configuring this server's reward."""
 
-import asyncio
-
 import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
+from src.services.tasks import spawn
 
 
 class SyncPromptView(discord.ui.View):
@@ -30,7 +29,7 @@ class SyncPromptView(discord.ui.View):
             return
         await self._finish(interaction, "🔄 Syncing your server tag rewards now. Check /status for progress.")
         if not service.is_syncing(self.guild_id):
-            asyncio.create_task(service.safe_full_sync(self.guild_id))
+            spawn(service.safe_full_sync(self.guild_id), name=f"setup-sync-{self.guild_id}")
 
     @discord.ui.button(label="Later", style=discord.ButtonStyle.secondary)
     async def later(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -87,7 +86,17 @@ class SetupCommand(Command):
             )
             return
 
-        if guild.me.top_role <= role:
+        # Guild.me is annotated as Member but is really get_member(self), which
+        # is None whenever the self member was never cached.
+        me = guild.me
+        if me is None:
+            await interaction.response.send_message(
+                "❌ I can't see my own roles in this server yet. Give me a moment and run /setup again.",
+                ephemeral=True,
+            )
+            return
+
+        if me.top_role <= role:
             await interaction.response.send_message(
                 f"❌ My highest role is below {role.mention}. Drag my role above it in "
                 "Server Settings, Roles, then run /setup again.", ephemeral=True

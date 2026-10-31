@@ -3,12 +3,14 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
 from src.commands.setup import SetupCommand, SyncPromptView
 from src.commands.status import StatusCommand
 from src.commands.sync import SyncCommand
 from src.core.bot import Bot
+from src.core.command import bot_permissions
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreError, StoreUnavailable
@@ -41,6 +43,34 @@ async def test_guard_rejects_unavailable_context(interaction, monkeypatch, failu
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
 
 
+# Guild.me is annotated as Member but is really get_member(self), which is None
+# whenever the self member was never cached - the normal case in limited mode.
+
+async def test_permission_check_falls_back_to_app_permissions(interaction):
+    interaction.guild.me = None
+    interaction.app_permissions = discord.Permissions(manage_roles=True)
+    assert await SyncCommand().guard(interaction) is True
+    interaction.response.send_message.assert_not_awaited()
+
+
+async def test_app_permissions_fallback_still_catches_a_missing_permission(interaction):
+    interaction.guild.me = None
+    interaction.app_permissions = discord.Permissions.none()
+    assert await SyncCommand().guard(interaction) is False
+    assert "manage_roles" in interaction.response.send_message.await_args.args[0]
+
+
+async def test_unknowable_permissions_are_reported_not_raised(interaction):
+    interaction.guild.me = None  # and no app_permissions on the interaction
+    assert await SyncCommand().guard(interaction) is False
+    assert "read my own permissions" in interaction.response.send_message.await_args.args[0]
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+def test_a_guildless_interaction_grants_no_permissions():
+    assert bot_permissions(SimpleNamespace(guild=None)) is None
+
+
 async def test_guard_allows_configured_developer(interaction, monkeypatch):
     command = SyncCommand()
     command.developer_only = True
@@ -67,6 +97,17 @@ async def test_setup_rejects_unassignable_roles(interaction, monkeypatch, role):
     monkeypatch.setattr(GuildConfig, "_instance", store)
     await SetupCommand()._configure(interaction, role)
     store.set_role.assert_not_awaited()
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+async def test_setup_explains_itself_when_its_own_roles_are_unknown(interaction, monkeypatch):
+    """Comparing role ranks needs guild.me, which can legitimately be None."""
+    store = SimpleNamespace(set_role=AsyncMock())
+    monkeypatch.setattr(GuildConfig, "_instance", store)
+    interaction.guild.me = None
+    await SetupCommand()._configure(interaction, Role())
+    store.set_role.assert_not_awaited()
+    assert "my own roles" in interaction.response.send_message.await_args.args[0]
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
 
 

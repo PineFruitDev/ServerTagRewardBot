@@ -14,6 +14,7 @@ from src.services.streaks import StreakStore
 from src.services.store_client import StoreClient, StoreError
 from src.services.logger import get_logger
 from src.services.tag_sync import TagSyncService
+from src.services.tasks import spawn
 
 log = get_logger("Main")
 
@@ -52,7 +53,7 @@ def build_bot(config: Config, members: bool) -> Bot:
             log.error("on_ready - Store check failed (%s); commands will report it until it recovers", exc)
             return
         if tag_sync is not None and config.sync_on_start:  # off by default; initial sync happens in /setup
-            asyncio.create_task(tag_sync.sync_all_guilds())
+            spawn(tag_sync.sync_all_guilds(), name="startup-sync")
 
     return bot
 
