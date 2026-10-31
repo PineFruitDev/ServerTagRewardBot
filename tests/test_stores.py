@@ -184,3 +184,21 @@ def test_leaderboard_excludes_zero_scores_and_honors_limit():
     assert rank(rows, "total", 2, 1000) == [("3", 3), ("2", 2)]
     assert rank(rows, "current", 2, 1000) == []
     assert rank(rows, "total", 0, 1000) == []
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (0, "less than a minute"), (59, "less than a minute"), (60, "1m"),
+    (3599, "59m"), (3600, "1h"), (86400, "1d"), (86460, "1d"),
+])
+def test_reward_duration_display_boundaries(seconds, expected):
+    assert humanize(seconds) == expected
+
+
+def test_active_streak_at_epoch_retains_historical_best():
+    row = {"active_since": 0, "longest_seconds": 200, "total_seconds": 300}
+    assert summarize(row, 100) == {"current": 100, "longest": 200, "total": 400, "active": True}
+
+
+def test_equal_reward_scores_keep_source_order():
+    rows = [{"user_id": uid, "total_seconds": 60} for uid in ("b", "a", "c")]
+    assert rank(rows, "total", 2, 100) == [("b", 60), ("a", 60)]
