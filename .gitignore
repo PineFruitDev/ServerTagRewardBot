@@ -20,5 +20,7 @@ Thumbs.db
 logs/
 *.log
 
-# Per-guild config store
+# Legacy local store (data now lives in tagbot-store / D1)
 data.db
+data.db*
+*.db-journal

@@ -28,7 +28,7 @@ Your server needs the Server Tag feature enabled for members to equip a tag.
 
 Discord exposes a member's equipped server tag on the User object as `primary_guild` (`{ identity_guild_id, identity_enabled, tag, badge }`). A member is repping a server's tag when `identity_guild_id` matches that server and `identity_enabled` is true.
 
-The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles live in a local SQLite store; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
+The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, so nothing sensitive is stored on the bot host; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
 
 ## Self-Hosting
 
@@ -52,9 +52,16 @@ DEVELOPER_IDS=your_user_id_here  # Optional
 ENVIRONMENT=development          # Optional
 SYNC_ON_START=true               # Optional
 SYNC_DELAY_MS=350                # Optional
+TAGBOT_STORE_URL=https://tagbot-store.<you>.workers.dev
+TAGBOT_STORE_KEY=<bearer secret, same as the Worker secret>
+MEMBERS_INTENT=true              # Optional
 ```
 
 > **Required Discord setup:** enable the **Server Members Intent** on the Bot page of the [Developer Portal](https://discord.com/developers/applications) and invite with the **Manage Roles** permission.
+>
+> **Limited mode:** if Discord refuses the Server Members intent (close code 4014, e.g. while a verified bot's intent request is pending), the bot logs a warning and reconnects without it. Slash commands keep working from the store; live tag sync and role updates stay off until the intent is granted and the bot restarts. Set `MEMBERS_INTENT=false` to start in limited mode directly.
+>
+> **Storage:** deploy the Worker in `worker/` (see `worker/wrangler.toml`), then set `TAGBOT_STORE_URL` and `TAGBOT_STORE_KEY`. `scripts/migrate_sqlite_to_d1.py` imports a legacy `data.db`; `scripts/smoke_test.py` checks a running store.
 
 ### 3. Deploy
 
@@ -82,8 +89,8 @@ src/
 │   └── help_command.py       # Auto-generated help
 └── services/
     ├── tag_sync.py           # ← Tag detection + role sync engine (multi-guild)
-    ├── guild_config.py       # Per-server reward roles (SQLite)
-    ├── streaks.py            # Streak tracking (SQLite)
+    ├── guild_config.py       # Per-server reward roles (tagbot-store)
+    ├── streaks.py            # Streak tracking (tagbot-store)
     ├── logger.py             # Contextual logging
     └── environment.py        # Config validation
 main.py                       # Entry point
@@ -110,6 +117,9 @@ register.py                   # Command registration
 | `ENVIRONMENT` | ❌ | Environment mode (defaults to production) |
 | `SYNC_ON_START` | ❌ | Sync all configured servers at startup (defaults to false; /setup handles first sync) |
 | `SYNC_DELAY_MS` | ❌ | Throttle between user re-fetches during sync (defaults to 350) |
+| `TAGBOT_STORE_URL` | ✅ | HTTPS URL of the tagbot-store Worker |
+| `TAGBOT_STORE_KEY` | ✅ | Bearer secret for the Worker (keep in a secrets manager) |
+| `MEMBERS_INTENT` | ❌ | Request the Server Members intent (defaults to true; falls back to limited mode if refused) |
 
 ## License Note
 This project is licensed under **[Apache 2.0](https://choosealicense.com/licenses/apache-2.0/) + the [Commons Clause](https://commonsclause.com/)**. In plain terms:
