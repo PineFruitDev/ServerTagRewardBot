@@ -99,6 +99,26 @@ before `SIGKILL`, leaving room for the close itself. If you run with a tighter
 `--stop-timeout`, lower `DRAIN_TIMEOUT` in `src/services/lifecycle.py` to
 match, or the process can be killed partway through the clean close.
 
+### When a command fails
+
+Discord gives an interaction a few seconds to be answered, so anything a
+command raises has to become a reply or the person who ran it is left with
+"the application did not respond" and no idea whether it took effect.
+`src/services/command_errors.py` is the one place that decides what a failure
+means, and both interaction surfaces go through it: a slash command callback
+via `CommandTree.on_error`, and a button on that command's own reply via
+`GuardedView`. The library's default `View.on_error` only logs, so a button
+left on a plain `discord.ui.View` answers nobody.
+
+A failure produces one ephemeral message and one log line. The message names
+the cause when the cause is something the reader can act on (a reward role
+sitting above the bot's own, a rate limit, a storage outage, a stale command
+list) and stays vague when it is a defect, since there is nothing useful to
+say and plenty to leak. No exception message, repr, traceback, response body
+or URL reaches either the reply or the log: `JsonFormatter` reduces exception
+arguments to their type name, so an unexpected error is logged with its type
+and the file and line that raised it instead.
+
 ## Project Structure
 
 ```
@@ -106,7 +126,8 @@ src/
 ├── core/
 │   ├── bot.py                # Main bot class
 │   ├── command.py            # Abstract command base
-│   └── command_manager.py    # Command management
+│   ├── command_manager.py    # Command management
+│   └── view.py               # Button/menu base that reports failures like a command
 ├── commands/
 │   ├── __init__.py           # ← Command registry (single source of truth)
 │   ├── setup.py              # /setup and /disable (admin onboarding)
@@ -121,6 +142,7 @@ src/
     ├── guild_config.py       # Per-server reward roles (tagbot-store)
     ├── streaks.py            # Streak tracking (tagbot-store)
     ├── logger.py             # Structured JSON logging with credential redaction
+    ├── command_errors.py     # ← One failure path for every command and button
     ├── discord_errors.py     # Classifies Discord API failures (fixable vs transient)
     ├── lifecycle.py          # Graceful shutdown on SIGINT/SIGTERM
     ├── tasks.py              # Background task supervision and shutdown drain
@@ -194,7 +216,8 @@ npm --prefix worker test
 ```
 
 The Python suite covers tag detection, role reconciliation, pagination and sync
-failures, slash command wiring and guards, the post-setup sync prompt,
+failures, slash command wiring and guards, the post-setup sync prompt, command
+and button failure reporting (including what the reply and the log leave out),
 configuration, storage retries and caching, streak math, and the one-time
 SQLite-to-D1 migration. Discord calls are mocked; HTTP client tests use a
 loopback server. Pytest blocks non-loopback connections, ignores `.env`, and
