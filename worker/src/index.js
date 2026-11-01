@@ -93,7 +93,13 @@ async function route(request, db) {
     }
     if (parts.length === 3 && parts[2] === "mark" && method === "POST") {
       const body = await readJson(request);
-      const now = Number.isInteger(body.now) && body.now > 0 ? body.now : Math.floor(Date.now() / 1000);
+      // isSafeInteger, not isInteger: 1e21 is an integer to JavaScript, so it
+      // passed and was stored as active_since, where it cannot survive a round
+      // trip through JSON intact. Same reason snowflake() screens IDs. This
+      // screens unrepresentable values, not implausible ones: a future
+      // timestamp inside the safe range is still accepted, since the bound
+      // between "skewed clock" and "wrong" is a policy this layer does not own.
+      const now = Number.isSafeInteger(body.now) && body.now > 0 ? body.now : Math.floor(Date.now() / 1000);
       const marks = Array.isArray(body.marks) ? body.marks : null;
       if (!marks || marks.length === 0 || marks.length > MAX_MARKS) {
         throw new HttpError(400, `marks must be a list of 1-${MAX_MARKS} items`);
