@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 import discord
 import pytest
 
+from src.services import discord_retry
 from src.services.discord_errors import describe
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
@@ -425,7 +426,15 @@ async def test_a_failed_refetch_logs_the_status_and_keeps_throttling(sync, monke
     with caplog.at_level("WARNING"):
         stats = await sync.service.full_sync("1")
     assert "HTTP 429" in caplog.text
-    sleep.assert_awaited_once_with(0.35)
+    # A 429 is retried before the refetch is given up on, so the member is
+    # fetched the full bounded number of times rather than once.
+    assert sync.http.get_user.await_count == discord_retry.ATTEMPTS
+    # Patching tag_sync.asyncio.sleep reaches the asyncio module itself, so this
+    # mock also catches the retry's own waits (0.0 under the suite's backoff).
+    # The throttle is what this test pins: still applied exactly once, after
+    # the refetch failed, so a failing fetch cannot spin the loop.
+    waits = [c.args[0] for c in sleep.await_args_list]
+    assert waits.count(0.35) == 1
     # Counted as checked, but with no tag payload there is nothing to act on.
     assert (stats.members_checked, stats.currently_repping) == (1, 0)
     sync.http.add_role.assert_not_awaited()

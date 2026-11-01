@@ -32,7 +32,7 @@ Your server needs the Server Tag feature enabled for members to equip a tag.
 
 Discord exposes a member's equipped server tag on the User object as `primary_guild` (`{ identity_guild_id, identity_enabled, tag, badge }`). A member is repping a server's tag when `identity_guild_id` matches that server and `identity_enabled` is true.
 
-The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, so nothing sensitive is stored on the bot host; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
+The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, so nothing sensitive is stored on the bot host; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits. Every Discord API call is additionally retried a bounded number of times on a rate limit (429) or a transient 5xx, waiting as long as Discord's `retry_after` asks and no longer than a fixed ceiling, so a role grant is applied exactly once however many attempts it took.
 
 ## Self-Hosting
 
@@ -122,6 +122,9 @@ src/
     ├── streaks.py            # Streak tracking (tagbot-store)
     ├── logger.py             # Structured JSON logging with credential redaction
     ├── discord_errors.py     # Classifies Discord API failures (fixable vs transient)
+    ├── discord_retry.py      # Bounded retry/backoff for Discord calls, honouring retry_after
+    ├── backoff.py            # Shared Retry-After parsing and jittered backoff
+    ├── store_client.py       # HTTPS client for tagbot-store (retries, timeouts)
     ├── lifecycle.py          # Graceful shutdown on SIGINT/SIGTERM
     ├── tasks.py              # Background task supervision and shutdown drain
     └── environment.py        # Startup config validation

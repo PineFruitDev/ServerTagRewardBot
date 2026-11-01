@@ -210,3 +210,27 @@ async def test_manual_sync_reports_an_unmanageable_role(interaction, monkeypatch
     assert "Manage Roles" in sent
     assert "HTTP 403" in sent
     assert "7" in sent
+
+
+async def test_manual_sync_reports_a_stall_as_temporary_not_as_a_misconfiguration(
+        interaction, monkeypatch):
+    """A rate limit or an outage is not something the admin can fix in Settings.
+
+    Reporting it like role_blocked would send them to change permissions that
+    were never the problem, so this branch says "try again" instead.
+    """
+    monkeypatch.setattr(GuildConfig, "_instance",
+                        SimpleNamespace(get_role=AsyncMock(return_value="10")))
+    stats = GuildStats(members_checked=12, roles_added=3, stalled_after=5)
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        is_syncing=lambda gid: False, full_sync=AsyncMock(return_value=stats),
+    ))
+    await SyncCommand().execute(interaction)
+    sent = interaction.followup.send.await_args.args[0]
+    assert "Sync complete" not in sent
+    assert "stopped early" in sent
+    assert "again" in sent
+    # The work that did land is still reported.
+    assert "12" in sent and "3" in sent
+    # Nothing here is a permissions problem.
+    assert "Manage Roles" not in sent

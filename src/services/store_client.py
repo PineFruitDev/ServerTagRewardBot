@@ -13,13 +13,11 @@ response carries Retry-After, that is honoured in place of the guess.
 import asyncio
 import json
 import os
-import random
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
 
+from src.services.backoff import jittered_delay, parse_retry_after
 from src.services.logger import get_logger
 
 log = get_logger("StoreClient")
@@ -106,7 +104,7 @@ class StoreClient:
                 if requested_wait is not None:
                     delay, source = requested_wait, "Retry-After"
                 else:
-                    delay = self._backoff * (2 ** (attempt - 1)) * (0.5 + random.random())
+                    delay = jittered_delay(attempt, self._backoff)
                     source = "backoff"
                 log.warning("request - %s %s failed (%s), retry %d/%d in %.2fs (%s)",
                             method, path, last_error, attempt, self._attempts - 1, delay, source)
@@ -119,28 +117,10 @@ class StoreClient:
     def _retry_after(resp: aiohttp.ClientResponse) -> float | None:
         """Seconds the store asked us to wait, or None when it did not ask.
 
-        RFC 9110 allows either a number of seconds or an HTTP-date, and
-        Cloudflare sends the numeric form on a 429. Both are read; anything
-        unparseable is ignored in favour of the computed backoff rather than
-        treated as zero, which would retry instantly into a rate limit.
+        Shared with the Discord REST paths (see backoff.parse_retry_after), so
+        a malformed header is read the same way on both sides.
         """
-        raw = resp.headers.get("Retry-After")
-        if not raw:
-            return None
-        raw = raw.strip()
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            pass
-        try:
-            when = parsedate_to_datetime(raw)
-        except (TypeError, ValueError):
-            return None
-        if when is None:
-            return None
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+        return parse_retry_after(resp.headers.get("Retry-After"))
 
     @staticmethod
     async def _error_detail(resp: aiohttp.ClientResponse) -> str:
