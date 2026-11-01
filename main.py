@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 from src.commands import ALL_COMMANDS
 from src.core.bot import Bot
+from src.services import discord_retry
 from src.services.environment import Config, Environment
 from src.services.guild_config import GuildConfig
 from src.services.lifecycle import serve
@@ -29,8 +30,14 @@ def build_bot(config: Config, members: bool) -> Bot:
     # GuildMembers is required for member update events (privileged intent)
     intents.members = members
 
-    # enable_debug_events exposes raw gateway dispatches for tag detection
-    bot = Bot(ALL_COMMANDS, intents=intents, enable_debug_events=members)
+    # enable_debug_events exposes raw gateway dispatches for tag detection.
+    # max_ratelimit_timeout puts a ceiling on how long discord.py will sleep off
+    # a 429 inside a single call: without it the library waits whatever
+    # retry_after it is handed, so one long global rate limit parks a sync or a
+    # deferred interaction indefinitely. Past the ceiling it raises RateLimited
+    # instead, which discord_retry bounds and the commands report.
+    bot = Bot(ALL_COMMANDS, intents=intents, enable_debug_events=members,
+              max_ratelimit_timeout=discord_retry.MAX_RATELIMIT_TIMEOUT)
     bot.limited_mode = not members
 
     tag_sync = TagSyncService(bot) if members else None

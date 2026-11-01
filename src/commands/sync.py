@@ -59,6 +59,20 @@ class SyncCommand(Command):
             )
             return
 
+        if stats.stalled_after is not None:
+            # Distinct from role_blocked: nothing here is for the admin to fix,
+            # so it must not tell them to go changing permissions.
+            await interaction.followup.send(
+                f"⚠️ **Sync stopped early:** {stats.stalled_after} role updates failed in a row, "
+                f"after retries, so I stopped instead of repeating that for every member. "
+                f"That usually means Discord is rate limiting me or having trouble.\n"
+                f"Nothing was lost; please run /sync again shortly.\n"
+                f"👥 **Members checked before stopping:** {stats.members_checked}\n"
+                f"➕ **Roles added:** {stats.roles_added}\n"
+                f"➖ **Roles removed:** {stats.roles_removed}"
+            )
+            return
+
         await interaction.followup.send(
             f"✅ **Sync complete**\n"
             f"👥 **Members checked:** {stats.members_checked}\n"

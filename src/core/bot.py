@@ -5,7 +5,8 @@ from discord import app_commands
 
 from src.core.command import Command
 from src.core.command_manager import CommandManager
-from src.services.discord_errors import describe, user_message
+from src.services import discord_retry
+from src.services.discord_errors import API_FAILURES, describe, user_message
 from src.services.logger import get_logger
 from src.services.store_client import StoreClient, StoreError, StoreUnavailable
 
@@ -28,8 +29,14 @@ class Bot(discord.Client):
         log.info("on_ready - Logged in as %s", self.user)
 
     async def sync_commands(self) -> int:
-        """Push the command tree to Discord. Returns how many commands synced."""
-        synced = await self.tree.sync()
+        """Push the command tree to Discord. Returns how many commands synced.
+
+        Retried on a rate limit or an outage. Global command registration is
+        one of the tightest buckets Discord has, and this runs on every
+        on_ready, so a reconnect storm is exactly when it gets refused. Failing
+        it without a retry leaves the bot connected but with stale commands.
+        """
+        synced = await discord_retry.call("tree.sync", self.tree.sync)
         log.info("sync_commands - Synced %d application (/) commands", len(synced))
         return len(synced)
 
@@ -51,10 +58,12 @@ class Bot(discord.Client):
         elif isinstance(original, StoreError):
             log.error("tree - /%s was rejected by the store: %s", name, original)
             message = "⚠️ My storage rejected that request. The bot owner has been notified in the logs."
-        elif isinstance(original, discord.HTTPException):
+        elif isinstance(original, API_FAILURES):
             # Discord refused the call rather than the bot breaking. The status
             # separates a fixable setup problem from an outage, so report it
             # as such instead of "an error occurred", and skip the traceback.
+            # RateLimited is included deliberately: it is not an HTTPException,
+            # so matching on that alone reported a rate limit as a crash.
             log.error("tree - /%s failed against the Discord API: %s", name, describe(original))
             message = user_message(original)
         else:
@@ -66,5 +75,9 @@ class Bot(discord.Client):
                 await interaction.followup.send(message, ephemeral=True)
             else:
                 await interaction.response.send_message(message, ephemeral=True)
-        except discord.HTTPException:
+        except API_FAILURES:
+            # Not retried: the interaction token is single-use for the initial
+            # response and expires, so a delayed resend earns a 40060 rather
+            # than delivering anything. Nothing is left to report to if the
+            # report itself cannot be delivered.
             pass
