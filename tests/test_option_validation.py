@@ -59,6 +59,9 @@ class Role:
         self.id, self.mention = id, f"<@&{id}>"
         self.guild = None if guild_id is None else SimpleNamespace(id=guild_id)
         self.default, self.managed, self.position = default, managed, position
+        # Not read by the option checks. Present so these fakes stay usable as
+        # the admin commands grow checks of their own about what a role carries.
+        self.permissions = SimpleNamespace(administrator=False)
 
     def is_default(self):
         return self.default
@@ -69,12 +72,19 @@ class Role:
 
 
 class Member:
-    """Enough of discord.Member for /repped."""
+    """Enough of discord.Member for /repped, and to pass an admin command's guard."""
 
     def __init__(self, *, id=42, guild_id=1, bot=False):
         self.id, self.bot, self.display_name = id, bot, "Tester"
         self.guild = None if guild_id is None else SimpleNamespace(id=guild_id)
         self.display_avatar = SimpleNamespace(url="https://example.invalid/a.png")
+        # The option checks ask nothing about the invoker's permissions, but
+        # /setup, /disable and /sync do, so a fake that cannot clear their
+        # guard would make these tests pass for the wrong reason.
+        self.guild_permissions = SimpleNamespace(
+            manage_guild=True, manage_roles=True, administrator=True,
+        )
+        self.top_role = 99
 
 
 class FakeTree:
@@ -100,7 +110,7 @@ def register(command):
 def interaction():
     return SimpleNamespace(
         guild_id=1,
-        guild=SimpleNamespace(id=1, me=SimpleNamespace(
+        guild=SimpleNamespace(id=1, owner_id=42, me=SimpleNamespace(
             top_role=10, guild_permissions=SimpleNamespace(manage_roles=True),
         )),
         user=Member(),
