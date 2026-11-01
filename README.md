@@ -91,7 +91,8 @@ src/
     ├── tag_sync.py           # ← Tag detection + role sync engine (multi-guild)
     ├── guild_config.py       # Per-server reward roles (tagbot-store)
     ├── streaks.py            # Streak tracking (tagbot-store)
-    ├── logger.py             # Contextual logging
+    ├── logger.py             # Structured JSON logging with credential redaction
+    ├── discord_errors.py     # Classifies Discord API failures (fixable vs transient)
     └── environment.py        # Config validation
 main.py                       # Entry point
 register.py                   # Command registration

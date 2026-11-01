@@ -164,3 +164,49 @@ async def test_command_errors_choose_response_or_followup(interaction, error, fr
     assert fragment in target.await_args.args[0]
     assert target.await_args.kwargs["ephemeral"] is True
     other.assert_not_awaited()
+
+
+# --- reporting Discord API failures to the person who ran the command --------
+
+def http_error(status, code=0):
+    body = {"code": code, "message": "Discord said no"} if code else "Discord said no"
+    return discord.HTTPException(SimpleNamespace(status=status, reason="reason"), body)
+
+
+@pytest.mark.parametrize("error,fragment", [
+    # A fixable setup problem must not read as an unexplained bug.
+    (http_error(403, 50013), "Manage Roles"),
+    (http_error(404, 10011), "/setup"),
+    (http_error(429), "rate limiting"),
+    (http_error(503), "having trouble"),
+])
+async def test_discord_api_failures_report_their_actual_cause(interaction, error, fragment):
+    await Bot._on_tree_error(None, interaction, SimpleNamespace(original=error))
+    sent = interaction.response.send_message.await_args.args[0]
+    assert fragment in sent
+    assert "error occurred" not in sent
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+async def test_discord_api_failure_does_not_leak_the_response_text(interaction):
+    error = http_error(400, 50035)
+    error.text = "Invalid Form Body: private-internal-detail"
+    await Bot._on_tree_error(None, interaction, SimpleNamespace(original=error))
+    assert "private-internal-detail" not in interaction.response.send_message.await_args.args[0]
+
+
+async def test_manual_sync_reports_an_unmanageable_role(interaction, monkeypatch):
+    """A sync that stopped early must say so rather than claim success."""
+    monkeypatch.setattr(GuildConfig, "_instance",
+                        SimpleNamespace(get_role=AsyncMock(return_value="10")))
+    stats = GuildStats(members_checked=7, role_blocked="HTTP 403 (Discord error 50013)")
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        is_syncing=lambda gid: False, full_sync=AsyncMock(return_value=stats),
+    ))
+    await SyncCommand().execute(interaction)
+    sent = interaction.followup.send.await_args.args[0]
+    assert "Sync complete" not in sent
+    assert "stopped early" in sent
+    assert "Manage Roles" in sent
+    assert "HTTP 403" in sent
+    assert "7" in sent

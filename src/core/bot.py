@@ -5,6 +5,7 @@ from discord import app_commands
 
 from src.core.command import Command
 from src.core.command_manager import CommandManager
+from src.services.discord_errors import describe, user_message
 from src.services.logger import get_logger
 from src.services.store_client import StoreClient, StoreError, StoreUnavailable
 
@@ -50,6 +51,12 @@ class Bot(discord.Client):
         elif isinstance(original, StoreError):
             log.error("tree - /%s was rejected by the store: %s", name, original)
             message = "⚠️ My storage rejected that request. The bot owner has been notified in the logs."
+        elif isinstance(original, discord.HTTPException):
+            # Discord refused the call rather than the bot breaking. The status
+            # separates a fixable setup problem from an outage, so report it
+            # as such instead of "an error occurred", and skip the traceback.
+            log.error("tree - /%s failed against the Discord API: %s", name, describe(original))
+            message = user_message(original)
         else:
             # Unexpected, so keep the traceback: it is the only record of the bug.
             log.error("tree - Error executing /%s: %s", name, original, exc_info=original)

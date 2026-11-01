@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, call
 import discord
 import pytest
 
+from src.services.discord_errors import describe
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreUnavailable
@@ -21,8 +22,9 @@ def user(uid="42", guild="1", enabled=True):
     }}
 
 
-def http_error(status=403):
-    return discord.HTTPException(SimpleNamespace(status=status, reason="test failure"), "test failure")
+def http_error(status=403, code=0):
+    body = {"code": code, "message": "test failure"} if code else "test failure"
+    return discord.HTTPException(SimpleNamespace(status=status, reason="test failure"), body)
 
 
 @pytest.fixture
@@ -196,7 +198,10 @@ async def test_full_sync_refetches_only_missing_tags_and_preserves_unknown_membe
     monkeypatch.setattr("src.services.tag_sync.asyncio.sleep", sleep)
     stats = await sync.service.full_sync("1")
     assert sync.http.get_user.await_args_list == [call(3), call(4)]
-    sleep.assert_awaited_once_with(0.35)
+    # Both refetches throttle, including the one Discord refused. Skipping the
+    # delay on failure would spin the loop at full speed exactly when the API
+    # is rate limiting or failing every member.
+    assert sleep.await_args_list == [call(0.35), call(0.35)]
     assert sync.http.add_role.await_args_list == [call(1, 1, 10), call(1, 3, 10)]
     sync.http.remove_role.assert_awaited_once_with(1, 2, 10)
     sync.streaks.mark_many.assert_awaited_once_with("1", [("1", True), ("2", False), ("3", True)])
@@ -319,3 +324,108 @@ async def test_background_sync_errors_are_contained(sync, monkeypatch):
     sync.config.all_guilds.side_effect = StoreUnavailable("offline")
     await sync.service.sync_all_guilds()
     full_sync.assert_awaited_once_with("1")
+
+
+# --- reporting and containing Discord API failures ---------------------------
+
+UNKNOWN_ROLE = 10011
+UNKNOWN_MEMBER = 10007
+
+
+async def test_role_failure_logs_the_status_code(sync, caplog):
+    """"HTTPException" alone cannot be triaged; the status is the whole signal."""
+    sync.http.add_role.side_effect = http_error(503)
+    with caplog.at_level("WARNING"):
+        assert await sync.service.apply_role("1", "10", "42", True) is False
+    assert "HTTP 503" in caplog.text
+
+
+async def test_a_successful_role_write_reports_success(sync):
+    assert await sync.service.apply_role("1", "10", "42", True) is True
+    # No call needed is also a correct end state.
+    assert await sync.service.apply_role("1", "10", "42", True, ["10"]) is True
+
+
+@pytest.mark.parametrize("error", [http_error(403), http_error(404, UNKNOWN_ROLE)])
+async def test_a_guild_wide_role_failure_is_recorded(sync, error):
+    sync.http.add_role.side_effect = error
+    assert await sync.service.apply_role("1", "10", "42", True) is False
+    assert sync.service.stats_for("1").role_blocked == describe(error)
+
+
+@pytest.mark.parametrize("error", [http_error(503), http_error(429), http_error(404, UNKNOWN_MEMBER)])
+async def test_a_per_member_failure_is_not_recorded_as_guild_wide(sync, error):
+    sync.http.add_role.side_effect = error
+    assert await sync.service.apply_role("1", "10", "42", True) is False
+    assert sync.service.stats_for("1").role_blocked is None
+
+
+async def test_an_unmanageable_role_stops_the_sync_instead_of_failing_per_member(sync):
+    """The bug this guards: a 403 repeated once per member across a whole guild."""
+    sync.http.get_members.return_value = [
+        {"user": user(str(i)), "roles": []} for i in range(1, 501)
+    ]
+    sync.http.add_role.side_effect = http_error(403)
+    stats = await sync.service.full_sync("1")
+    # One doomed call, not 500.
+    sync.http.add_role.assert_awaited_once()
+    assert stats.role_blocked == "HTTP 403"
+    assert stats.members_checked == 1
+    # Work completed before stopping is still banked, and the lock is released.
+    sync.streaks.mark_many.assert_awaited_once_with("1", [("1", True)])
+    assert not sync.service.is_syncing("1")
+
+
+async def test_a_member_who_left_does_not_stop_the_sync(sync):
+    """An unknown-member 404 is about that member, not the guild."""
+    sync.http.get_members.return_value = [
+        {"user": user(str(i)), "roles": []} for i in range(1, 4)
+    ]
+    sync.http.add_role.side_effect = [http_error(404, UNKNOWN_MEMBER), None, None]
+    stats = await sync.service.full_sync("1")
+    assert sync.http.add_role.await_count == 3
+    assert stats.role_blocked is None
+    assert stats.members_checked == 3
+
+
+async def test_a_new_sync_retests_a_role_that_was_blocked_before(sync):
+    """An admin may have fixed the permissions since the last attempt."""
+    sync.http.get_members.return_value = [{"user": user("1"), "roles": []}]
+    sync.http.add_role.side_effect = http_error(403)
+    assert (await sync.service.full_sync("1")).role_blocked == "HTTP 403"
+    sync.http.add_role.side_effect = None
+    stats = await sync.service.full_sync("1")
+    assert stats.role_blocked is None
+    assert stats.members_checked == 1
+
+
+async def test_live_updates_keep_trying_after_a_blocked_role(sync):
+    """Permissions can be fixed at any moment, so the gateway path never latches off."""
+    sync.http.add_role.side_effect = http_error(403)
+    frame = json.dumps({"t": "GUILD_MEMBER_UPDATE", "d": {"guild_id": "1", "user": user("42")}})
+    await sync.service.on_socket_raw_receive(frame)
+    await sync.service.on_socket_raw_receive(frame)
+    assert sync.http.add_role.await_count == 2
+
+
+async def test_member_list_failure_logs_the_status_before_raising(sync, caplog):
+    sync.http.get_members.side_effect = http_error(503)
+    with caplog.at_level("ERROR"):
+        with pytest.raises(discord.HTTPException):
+            await sync.service.full_sync("1")
+    assert "HTTP 503" in caplog.text
+    assert sync.service.stats_for("1").last_sync_at is None
+
+
+async def test_a_failed_refetch_logs_the_status_and_keeps_throttling(sync, monkeypatch, caplog):
+    sync.http.get_members.return_value = [{"user": {"id": "7"}, "roles": []}]
+    sync.http.get_user.side_effect = http_error(429)
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.services.tag_sync.asyncio.sleep", sleep)
+    with caplog.at_level("WARNING"):
+        stats = await sync.service.full_sync("1")
+    assert "HTTP 429" in caplog.text
+    sleep.assert_awaited_once_with(0.35)
+    # Counted as checked, but with no tag payload there is nothing to act on.
+    assert (stats.members_checked, stats.currently_repping) == (1, 0)
+    sync.http.add_role.assert_not_awaited()
