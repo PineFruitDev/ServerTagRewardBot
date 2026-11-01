@@ -10,6 +10,7 @@ from src.commands import ALL_COMMANDS
 from src.core.bot import Bot
 from src.services.environment import Config, Environment
 from src.services.guild_config import GuildConfig
+from src.services.lifecycle import serve
 from src.services.streaks import StreakStore
 from src.services.store_client import StoreClient, StoreError
 from src.services.logger import configure_library_logging, get_logger
@@ -60,8 +61,10 @@ def build_bot(config: Config, members: bool) -> Bot:
 
 async def start(config: Config, members: bool) -> None:
     bot = build_bot(config, members)
+    # Leaving the block closes the gateway and the store session, which serve()
+    # relies on: it drains background work first, while both are still usable.
     async with bot:
-        await bot.start(config.discord_token)
+        await serve(bot, config.discord_token)
 
 
 async def run(config: Config) -> None:
@@ -107,7 +110,10 @@ def main() -> None:
         log.critical("main - Discord rejected DISCORD_TOKEN (invalid or reset). Update .env and restart.")
         sys.exit(1)
     except KeyboardInterrupt:
-        pass
+        # Only reachable for a Ctrl-C landing before the loop installed its
+        # handlers; after that, serve() handles SIGINT without raising.
+        log.info("main - Interrupted before startup finished")
+    log.info("main - Shutdown complete")
 
 
 if __name__ == "__main__":
