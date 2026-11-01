@@ -48,9 +48,10 @@ def register(command):
 class Role:
     """Enough of discord.Role for the setup checks, including rank comparison."""
 
-    def __init__(self, *, default=False, managed=False, position=1):
+    def __init__(self, *, default=False, managed=False, position=1, administrator=False):
         self.id, self.mention = 10, "<@&10>"
         self.default, self.managed, self.position = default, managed, position
+        self.permissions = SimpleNamespace(administrator=administrator)
 
     def is_default(self):
         return self.default
@@ -67,7 +68,10 @@ def interaction():
         guild=SimpleNamespace(id=1, me=SimpleNamespace(
             top_role=10, guild_permissions=SimpleNamespace(manage_roles=True),
         )),
-        user=SimpleNamespace(id=42),
+        # An authorised invoker, ranked above every role these tests build.
+        user=SimpleNamespace(id=42, top_role=100, guild_permissions=SimpleNamespace(
+            manage_guild=True, administrator=False,
+        )),
         response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock(),
                                  edit_message=AsyncMock(), is_done=lambda: False),
         followup=SimpleNamespace(send=AsyncMock()),

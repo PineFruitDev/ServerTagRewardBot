@@ -442,12 +442,15 @@ class FakeRole:
     """A discord.Role stand-in; ordering follows position, the way the real one does."""
 
     def __init__(self, role_id: str = ROLE, position: int = 5, *,
-                 managed: bool = False, default: bool = False, name: str = "Tag Crew"):
+                 managed: bool = False, default: bool = False, name: str = "Tag Crew",
+                 permissions: discord.Permissions | None = None):
         self.id = int(role_id)
         self.name = name
         self.position = position
         self.managed = managed
         self._default = default
+        # Permissions.none() is falsy, so this is compared against None
+        self.permissions = discord.Permissions.none() if permissions is None else permissions
 
     def is_default(self) -> bool:
         return self._default
@@ -496,7 +499,11 @@ class FakeInteraction:
                  app_permissions: discord.Permissions | None = None, dm: bool = False):
         self.guild = None if dm else (FakeGuild() if guild is _UNSET else guild)
         self.guild_id = None if self.guild is None else self.guild.id
-        self.user = user if user is not None else FakeMember(user_id(1), name="Admin")
+        # The default invoker is an admin holding Manage Server, which is what
+        # the state-changing commands gate on; guild.me separately holds the
+        # Manage Roles the bot itself needs. Pass a user to vary either.
+        self.user = user if user is not None else FakeMember(
+            user_id(1), name="Admin", permissions=discord.Permissions(manage_guild=True))
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.command = SimpleNamespace(name="test")

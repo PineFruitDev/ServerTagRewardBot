@@ -3,7 +3,7 @@
 import discord
 from discord import app_commands
 
-from src.core.command import Command, CommandHelpInfo
+from src.core.command import Command, CommandHelpInfo, user_permissions
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 from src.services.tasks import spawn
@@ -49,6 +49,7 @@ class SetupCommand(Command):
     )
 
     required_permissions = ("manage_roles",)
+    required_user_permissions = ("manage_guild", "administrator")
     guild_only = True
 
     def register(self, tree: app_commands.CommandTree) -> None:
@@ -83,6 +84,34 @@ class SetupCommand(Command):
         if role.is_default() or role.managed:
             await interaction.response.send_message(
                 "❌ That role can't be assigned by bots. Pick a regular server role.", ephemeral=True
+            )
+            return
+
+        # The reward is handed out automatically to everyone wearing the tag,
+        # so an Administrator reward role turns equipping a tag into taking
+        # over the server. Nobody gets to opt into that, the owner included.
+        if role.permissions.administrator:
+            await interaction.response.send_message(
+                f"❌ {role.mention} has the **Administrator** permission, so I won't hand it out "
+                "automatically to everyone repping the tag. Pick a role without it.",
+                ephemeral=True,
+            )
+            return
+
+        # Manage Server does not confer Manage Roles, so without this check a
+        # member holding only Manage Server could name any role below mine as
+        # the reward, equip the tag and collect it. Mirror Discord's own rule
+        # instead: you cannot hand out a role you could not assign yourself.
+        # guild_permissions is all-True for the owner and for Administrator
+        # holders, so both of those skip this.
+        held = user_permissions(interaction)
+        author_top = getattr(interaction.user, "top_role", None)
+        if (held is not None and not getattr(held, "administrator", False)
+                and author_top is not None and author_top <= role):
+            await interaction.response.send_message(
+                f"❌ {role.mention} is not below your own highest role, so you can't make it the "
+                "reward. Pick a role beneath yours, or ask an admin whose role sits above it.",
+                ephemeral=True,
             )
             return
 
