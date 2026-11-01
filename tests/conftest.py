@@ -5,13 +5,14 @@ from unittest.mock import patch
 import pytest
 
 from src.services import tasks
-from src.services.environment import Config, Environment, OPTIONAL_VARS, REQUIRED_VARS
+from src.services.cooldowns import Cooldowns
+from src.services.environment import Environment, OPTIONAL_VARS, REQUIRED_VARS
 from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreClient
 from src.services.streaks import StreakStore
 from src.services.tag_sync import TagSyncService
 from tests.integration_harness import (GUILD, ROLE, Clock, CommandBot, FakeStore, TagBot,
-                                       streaks_module)
+                                       config_for_tests, streaks_module)
 
 
 def pytest_sessionstart(session):
@@ -28,7 +29,7 @@ def pytest_sessionfinish(session):
 def isolated_state(monkeypatch):
     for name in (*REQUIRED_VARS, *OPTIONAL_VARS):
         monkeypatch.delenv(name, raising=False)
-    for service in (GuildConfig, StoreClient, StreakStore, TagSyncService):
+    for service in (Cooldowns, GuildConfig, StoreClient, StreakStore, TagSyncService):
         monkeypatch.setattr(service, "_instance", None)
     monkeypatch.setattr(Environment, "_config", None)
     # A test that drains background work must not leave spawn() closed for the
@@ -52,9 +53,13 @@ def clock(monkeypatch):
 
 @pytest.fixture
 def test_config(isolated_state):
-    """Config with no inter-request sync delay, so full syncs run at test speed."""
-    config = Config(discord_token="x" * 60, environment="test", sync_on_start=False,
-                    sync_delay_ms=0, members_intent=True)
+    """Config with no inter-request sync delay, so full syncs run at test speed.
+
+    Rate limits are off here so that a test is free to run one command twice
+    and to replay one gateway event. The limits themselves are configured
+    explicitly, against a clock the test controls, in tests/test_cooldowns.py.
+    """
+    config = config_for_tests()
     Environment._config = config
     return config
 

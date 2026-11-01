@@ -17,6 +17,7 @@ Built on the [PyTemplateBot](https://github.com/PineFruitDev/PyTemplateBot) arch
 - **First Sync, Your Call**: setup ends by asking "Would you like to sync your server tag rewards now?" with one-click buttons
 - **Streaks & Leaderboard**: `/repped` shows anyone's current, longest, and all-time tag streaks; `/leaderboard` ranks the server's most loyal reppers
 - **Admin Commands**: `/sync` for manual reconciliation, `/status` for live statistics, `/disable` to opt out
+- **Spam Resistant**: Per-member and per-server command cooldowns with friendly "try again in 5 seconds" replies, and duplicate reward grants collapsed instead of re-applied
 - **Production Ready**: Per-guild stats, rate-limit friendly syncing, and clean architecture
 
 ## Using the Bot (server admins)
@@ -33,6 +34,38 @@ Your server needs the Server Tag feature enabled for members to equip a tag.
 Discord exposes a member's equipped server tag on the User object as `primary_guild` (`{ identity_guild_id, identity_enabled, tag, badge }`). A member is repping a server's tag when `identity_guild_id` matches that server and `identity_enabled` is true.
 
 The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, so nothing sensitive is stored on the bot host; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
+
+### Cooldowns and rate limits
+
+Commands and reward grants are both protected from being spammed, in
+deliberately different ways, because only one of them is safe to refuse.
+
+**Commands can be refused.** Every slash command carries two limits: one per
+member per server (`COMMAND_COOLDOWN_SECONDS`, 5 by default) and one for the
+server as a whole (`GUILD_COMMAND_LIMIT` uses per `GUILD_COMMAND_WINDOW_SECONDS`,
+20 per minute by default). Whichever trips, the member gets a friendly ephemeral
+reply telling them how long to wait, and the run costs no store round trip. The
+two are weighed together before either is spent, so a member refused because the
+server is busy does not also start their own cooldown. `/sync` sets its own
+stricter limits (one per admin per minute, three per server per five minutes)
+because it is the one command that costs an API call per member.
+
+**Reward grants cannot be refused.** Dropping one would leave a member wearing a
+role they no longer earn, or missing one they do, until something else noticed.
+So grants are never rate limited; instead, repeats are collapsed. `GUILD_MEMBER_UPDATE`
+fires for *every* member edit (a nickname, a timeout, someone else's roles), each
+carrying the same unchanged tag state and costing a store write to re-record a
+streak that has not moved. For `REWARD_COOLDOWN_SECONDS` after a successful role
+write, an event is skipped only if it both repeats that same decision and carries
+roles that already agree with it. So nothing that has anything to say is ever
+dropped: a tag that actually changed is acted on (equip, unequip and equip again
+inside one second still produces all three role updates), an event showing the
+reward role pulled by hand restores it, and a failed write records nothing at all
+so the next event retries it. `/status` reports how many events were skipped.
+
+Every limit is off at `0`, and all of them are per process and in memory, which
+needs no storage and loses nothing worse than one redundant role write on a
+restart.
 
 ## Self-Hosting
 
@@ -118,6 +151,7 @@ src/
 │   └── help_command.py       # Auto-generated help
 └── services/
     ├── tag_sync.py           # ← Tag detection + role sync engine (multi-guild)
+    ├── cooldowns.py          # Command rate limits + reward duplicate collapsing
     ├── guild_config.py       # Per-server reward roles (tagbot-store)
     ├── streaks.py            # Streak tracking (tagbot-store)
     ├── logger.py             # Structured JSON logging with credential redaction
@@ -157,6 +191,10 @@ only when you intend to update the application’s slash commands.
 | `TAGBOT_STORE_URL` | ✅ | `https://` URL, or `http://localhost` for `wrangler dev` | HTTPS URL of the tagbot-store Worker |
 | `TAGBOT_STORE_KEY` | ✅ | 32+ characters | Bearer secret for the Worker (keep in a secrets manager) |
 | `MEMBERS_INTENT` | ❌ | boolean (default `true`) | Request the Server Members intent; falls back to limited mode if refused |
+| `COMMAND_COOLDOWN_SECONDS` | ❌ | whole seconds (default `5`) | Wait between one member's uses of the same command in one server. `0` disables |
+| `GUILD_COMMAND_LIMIT` | ❌ | whole number (default `20`) | Uses of one command allowed per server per window. `0` disables |
+| `GUILD_COMMAND_WINDOW_SECONDS` | ❌ | whole seconds (default `60`) | Length of that per-server window. `0` disables |
+| `REWARD_COOLDOWN_SECONDS` | ❌ | whole seconds (default `30`) | How long an applied reward decision suppresses repeats of itself. `0` applies every repeat |
 
 Booleans accept `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off`, in any case.
 A blank value is treated as unset and takes the default; anything unparseable
@@ -194,9 +232,9 @@ npm --prefix worker test
 ```
 
 The Python suite covers tag detection, role reconciliation, pagination and sync
-failures, slash command wiring and guards, the post-setup sync prompt,
-configuration, storage retries and caching, streak math, and the one-time
-SQLite-to-D1 migration. Discord calls are mocked; HTTP client tests use a
+failures, slash command wiring and guards, cooldowns and reward duplicate
+collapsing, the post-setup sync prompt, configuration, storage retries and
+caching, streak math, and the one-time SQLite-to-D1 migration. Discord calls are mocked; HTTP client tests use a
 loopback server. Pytest blocks non-loopback connections, ignores `.env`, and
 isolates configuration and service singletons between tests. No Discord or
 Cloudflare credentials are needed.

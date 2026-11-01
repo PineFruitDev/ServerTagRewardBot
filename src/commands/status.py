@@ -59,6 +59,8 @@ class StatusCommand(Command):
             .add_field(name="➕ Roles Added", value=str(stats.roles_added), inline=True)
             .add_field(name="➖ Roles Removed", value=str(stats.roles_removed), inline=True)
             .add_field(name="⚡ Live Updates Seen", value=str(stats.live_updates), inline=True)
+            .add_field(name="⏭️ Duplicate Updates Skipped",
+                       value=str(stats.duplicates_collapsed), inline=True)
             .add_field(name="🕐 Last Full Sync", value=last_sync, inline=True)
         )
         embed.timestamp = discord.utils.utcnow()

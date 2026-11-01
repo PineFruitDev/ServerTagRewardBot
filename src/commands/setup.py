@@ -63,7 +63,10 @@ class SetupCommand(Command):
         @tree.command(name="disable", description="Stop managing the tag reward role in this server")
         @app_commands.default_permissions(manage_guild=True)
         async def disable(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
+            # Named so /disable and /setup hold separate cooldowns: an admin
+            # who turns rewards off should be able to turn them straight back
+            # on, and the pair is how you fix a mistaken role.
+            if not await self.guard(interaction, name="disable"):
                 return
             was_configured = await GuildConfig.get_instance().disable(str(interaction.guild_id))
             message = (
