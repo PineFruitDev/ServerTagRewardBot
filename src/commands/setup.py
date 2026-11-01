@@ -4,13 +4,16 @@ import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
+from src.core.view import GuardedView
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 from src.services.tasks import spawn
 
 
-class SyncPromptView(discord.ui.View):
+class SyncPromptView(GuardedView):
     """Final step of setup: offer to run the first sync right away."""
+
+    command_name = "setup"
 
     def __init__(self, guild_id: str):
         super().__init__(timeout=300)
