@@ -111,6 +111,17 @@ async def test_setup_explains_itself_when_its_own_roles_are_unknown(interaction,
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
 
 
+async def test_setup_refuses_a_call_with_no_guild(interaction, monkeypatch):
+    """guard() turns DMs away first, but _configure must not assume a guild."""
+    store = SimpleNamespace(set_role=AsyncMock())
+    monkeypatch.setattr(GuildConfig, "_instance", store)
+    interaction.guild = None
+    await SetupCommand()._configure(interaction, Role())
+    store.set_role.assert_not_awaited()
+    assert "only be used in servers" in interaction.response.send_message.await_args.args[0]
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
 async def test_setup_saves_role_and_offers_sync(interaction, monkeypatch):
     store = SimpleNamespace(set_role=AsyncMock())
     monkeypatch.setattr(GuildConfig, "_instance", store)
