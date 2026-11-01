@@ -106,6 +106,7 @@ src/
 ├── core/
 │   ├── bot.py                # Main bot class
 │   ├── command.py            # Abstract command base
+│   ├── options.py            # ← Bounds and shape checks for slash command options
 │   └── command_manager.py    # Command management
 ├── commands/
 │   ├── __init__.py           # ← Command registry (single source of truth)
@@ -139,6 +140,40 @@ register.py                   # Command registration
 - `/disable` - Stop managing the reward role in this server
 - `/ping` - Basic ping/pong with latency
 - `/help [command]` - Auto-generated help system
+
+### What each option accepts
+
+Every option is bounded twice: once in the declaration Discord validates against,
+and once at runtime in `src/core/options.py`, on the value that actually arrived.
+The second pass is not redundant. Discord checks an option against the command
+definition it holds on file, which is a cached copy of a past build, and
+`register.py` is a manual step here, so a build whose options have changed runs
+against a stale definition until someone re-registers. discord.py closes only
+part of that gap itself: an undeclared **choice** value raises before the callback
+runs, but a **`Range` is declaration-only** (`RangeTransformer` passes the value
+through untouched), so it bounds nothing once the command is live.
+
+| Option | Declared | Checked again at runtime |
+|--------|----------|--------------------------|
+| `/setup role` | role, resolved in this guild | an id Discord could have issued, belonging to this server, before anything is persisted |
+| `/repped user` | member, resolved in this guild | the same, before the streak lookup |
+| `/leaderboard sort` | three choices | falls back to current streak, so the heading always names the ordering actually used |
+| `/help command` | `Range[str, 1, 32]` | clamped and markdown-escaped before being quoted back, and sent with no allowed mentions |
+
+Ids get this treatment because the store answers a malformed path segment with a
+flat `400 invalid guild_id`, which the bot cannot turn into anything useful for
+the person who ran the command. The gateway path has shape-checked every id since
+the public rewrite; the command path now shares that one definition of the rule
+instead of trusting `str(interaction.guild_id)`, which turns a missing guild into
+the literal string `"None"`.
+
+A refusal is always a private (ephemeral) reply naming the option at fault, and
+nothing reaches the store or Discord's REST API before it. A walk of
+`src/commands` keeps this from quietly regressing: it fails if an option is
+declared without a range, a set of choices, or a resolved entity type, if an
+option has no description, or if a name or description outgrows Discord's own
+limits, catching that last one in CI rather than as a 400 from a hand-run
+`register.py`.
 
 ## Environment Variables
 

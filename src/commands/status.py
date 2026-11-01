@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
+from src.core.options import require_guild_scope
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 
@@ -27,7 +28,9 @@ class StatusCommand(Command):
             await self.execute(interaction)
 
     async def execute(self, interaction: discord.Interaction) -> None:
-        guild_id = str(interaction.guild_id)
+        guild_id = await require_guild_scope(interaction)
+        if guild_id is None:
+            return
         role_id = await GuildConfig.get_instance().get_role(guild_id)
 
         if role_id is None:

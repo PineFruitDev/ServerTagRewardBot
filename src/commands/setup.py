@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
+from src.core.options import require_guild_scope, target_refusal
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 from src.services.tasks import spawn
@@ -65,7 +66,10 @@ class SetupCommand(Command):
         async def disable(interaction: discord.Interaction) -> None:
             if not await self.guard(interaction):
                 return
-            was_configured = await GuildConfig.get_instance().disable(str(interaction.guild_id))
+            scope = await require_guild_scope(interaction)
+            if scope is None:
+                return
+            was_configured = await GuildConfig.get_instance().disable(scope)
             message = (
                 "🛑 Tag rewards disabled for this server. Existing roles are left as they are; run /setup to turn it back on."
                 if was_configured else
@@ -78,6 +82,18 @@ class SetupCommand(Command):
 
     async def _configure(self, interaction: discord.Interaction, role: discord.Role) -> None:
         guild = interaction.guild
+
+        # The role option decides what gets persisted and what every later
+        # grant targets, so bound it before anything is written: a usable id,
+        # and a role that belongs to the server being configured.
+        scope = await require_guild_scope(interaction)
+        if scope is None:
+            return
+
+        refusal = target_refusal(interaction, role, "role")
+        if refusal is not None:
+            await interaction.response.send_message(f"❌ {refusal}", ephemeral=True)
+            return
 
         # Sanity checks that save admins a support message later
         if role.is_default() or role.managed:
@@ -103,7 +119,7 @@ class SetupCommand(Command):
             )
             return
 
-        await GuildConfig.get_instance().set_role(str(guild.id), str(role.id))
+        await GuildConfig.get_instance().set_role(scope, str(role.id))
 
         await interaction.response.send_message(
             f"✅ Set up! Members repping this server's tag now receive {role.mention}.\n\n"
