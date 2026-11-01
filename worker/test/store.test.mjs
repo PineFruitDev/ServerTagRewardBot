@@ -89,6 +89,35 @@ describe("tagbot-store HTTP contract with local D1", { concurrency: false }, () 
     });
   }
 
+  // The scheme is matched exactly, so a lowercase "bearer" is refused even
+  // though RFC 9110 says auth schemes are case-insensitive. Pinned as-is
+  // rather than relaxed: widening what counts as a valid way to present the
+  // store key is a security decision, not a test-coverage one. Without this
+  // case, dropping the startsWith check entirely still passes the suite,
+  // because slice(7) happens to strip a 7-character scheme either way.
+  for (const [name, authorization] of [
+    ["lowercase scheme", `bearer ${KEY}`],
+    ["uppercase scheme", `BEARER ${KEY}`],
+    ["no scheme", KEY],
+    ["doubled scheme", `Bearer Bearer ${KEY}`],
+  ]) {
+    test(`rejects a ${name}`, async () => {
+      assert.deepEqual(await request("/health", { authorization }),
+        { status: 401, body: { error: "unauthorized" } });
+    });
+  }
+
+  // Both sides are hashed before comparison so lengths always match. A wrong
+  // key the same length as the real one is the case that would pass if that
+  // hashing were dropped in favour of a raw compare against a fixed prefix.
+  test("a wrong key is refused whatever its length", async () => {
+    assert.equal(KEY.length, "x".repeat(KEY.length).length);
+    for (const wrong of ["x".repeat(KEY.length), `${KEY}x`, KEY.slice(0, -1), ""]) {
+      assert.deepEqual(await request("/health", { authorization: `Bearer ${wrong}` }),
+        { status: 401, body: { error: "unauthorized" } });
+    }
+  });
+
   test("missing configuration and unauthorized access never require a DB binding", async () => {
     const unconfigured = localWorker();
     const noDB = localWorker({ bindings: { TAGBOT_STORE_KEY: KEY } });
@@ -122,6 +151,19 @@ describe("tagbot-store HTTP contract with local D1", { concurrency: false }, () 
     await ok(`/guilds/${gid}`, { method: "PUT", body: { role_id: "30" } });
     assert.deepEqual(await ok(`/guilds/${gid}`), { role_id: "30" });
     assert.deepEqual(await ok("/guilds/2"), { role_id: "20" });
+  });
+
+  // The bot's startup sync walks this listing, so its order needs to be the
+  // store's choice rather than whatever the query planner returns. guild_id is
+  // TEXT, so ORDER BY sorts lexicographically, not numerically: "200" sorts
+  // before "30", which sorts before "4". The existing lifecycle test could not
+  // see this, because the two guilds it inserts happen to come back in
+  // insertion order under either query.
+  test("the guild listing is ordered by guild_id, not by insertion", async () => {
+    for (const gid of ["30", "4", "200"]) {
+      await ok(`/guilds/${gid}`, { method: "PUT", body: { role_id: "9" } });
+    }
+    assert.deepEqual((await ok("/guilds")).guilds.map(([gid]) => gid), ["200", "30", "4"]);
   });
 
   test("safe integer IDs remain supported and large string IDs stay exact", async () => {
@@ -166,6 +208,29 @@ describe("tagbot-store HTTP contract with local D1", { concurrency: false }, () 
     });
   }
 
+  // The table above asserts the status but not the message, so it cannot tell
+  // which guard produced the 400. That matters twice over: the message is what
+  // an operator reading store logs has to work from, and a JSON array passes
+  // readJson's `typeof body === "object"` check (arrays are objects in
+  // JavaScript) and is only caught by the field validation behind it. Without
+  // these, loosening that guard to a bare truthiness check stays green.
+  for (const [name, path, opts, error] of [
+    ["an array body", "/guilds/1", { method: "PUT", rawBody: "[]" }, "invalid role_id"],
+    ["a scalar body", "/guilds/1", { method: "PUT", rawBody: '"text"' }, "body must be a JSON object"],
+    ["a null body", "/guilds/1", { method: "PUT", rawBody: "null" }, "body must be a JSON object"],
+    ["unparseable JSON", "/guilds/1", { method: "PUT", rawBody: "{" }, "body must be a JSON object"],
+    ["an absent role_id", "/guilds/1", { method: "PUT", body: {} }, "invalid role_id"],
+    ["an array body on mark", "/streaks/1/mark", { method: "POST", rawBody: "[]" },
+      "marks must be a list of 1-50 items"],
+    ["a non-boolean repping", "/streaks/1/mark",
+      { method: "POST", body: { now: 100, marks: [{ user_id: "42", repping: 1 }] } },
+      "repping must be a boolean"],
+  ]) {
+    test(`${name} is refused by name`, async () => {
+      assert.deepEqual(await request(path, opts), { status: 400, body: { error } });
+    });
+  }
+
   test("accepts the maximum 50-mark batch", async () => {
     const marks = Array.from({ length: 50 }, (_, i) => [String(i + 1), true]);
     assert.deepEqual(await mark("1", 100, marks), { ok: true, count: 50 });
@@ -185,6 +250,43 @@ describe("tagbot-store HTTP contract with local D1", { concurrency: false }, () 
     await mark("1", 200, [["42", true]]);
     await mark("1", 275, [["42", false]]);
     assert.deepEqual(await row(), { user_id: "42", active_since: null, total_seconds: 125, longest_seconds: 75 });
+  });
+
+  // The streak sequence above runs 50s then 75s, so each close sets a new
+  // best and MAX(longest_seconds, ...) is never actually asked to defend an
+  // older record. This is the case that asks it: a long streak, then a short
+  // one. Dropping the MAX leaves the suite green otherwise, and the effect is
+  // visible to members, because /repped and /leaderboard sort:longest read
+  // this column. A player with a 10-day record would watch it reset to an hour
+  // the next time they briefly equipped and removed the tag.
+  test("closing a shorter streak does not lower the recorded longest", async () => {
+    await mark("1", 1000000, [["42", true]]);
+    await mark("1", 1864000, [["42", false]]);          // ten days
+    assert.deepEqual(await row(), {
+      user_id: "42", active_since: null, total_seconds: 864000, longest_seconds: 864000,
+    });
+
+    await mark("1", 1900000, [["42", true]]);
+    await mark("1", 1903600, [["42", false]]);          // one hour
+    assert.deepEqual(await row(), {
+      user_id: "42", active_since: null, total_seconds: 867600, longest_seconds: 864000,
+    });
+  });
+
+  // The same guarantee for a streak that is still running: summarize() in
+  // streaks.py reports max(longest_seconds, current), so an in-progress run
+  // that beats the record shows up immediately, but it must not be written
+  // into longest_seconds until it closes.
+  test("a running streak that beats the record is not banked until it closes", async () => {
+    await mark("1", 1000000, [["42", true]]);
+    await mark("1", 1003600, [["42", false]]);          // one hour, banked
+    await mark("1", 1010000, [["42", true]]);           // a longer run begins
+    assert.deepEqual(await row(), {
+      user_id: "42", active_since: 1010000, total_seconds: 3600, longest_seconds: 3600,
+    });
+
+    await mark("1", 1874000, [["42", false]]);          // ten days, now banked
+    assert.equal((await row()).longest_seconds, 864000);
   });
 
   test("clock rollback cannot subtract time and users are isolated by guild", async () => {

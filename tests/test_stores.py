@@ -173,6 +173,99 @@ async def test_mark_delegates_single_member_and_stops_on_failed_batch():
     assert client.post.await_count == 1
 
 
+async def test_mark_forwards_a_member_who_stopped_repping():
+    """mark()'s only job is to forward its arguments, including repping=False.
+
+    Every existing case passes True, so a mark() that hardcoded True would
+    still pass the suite. Production reaches the store through mark_many, so
+    nothing is broken today; this pins the single-member entry point before a
+    live equip/unequip handler starts using it, because the failure mode there
+    is a streak that can be started and never closed.
+    """
+    client = FakeClient()
+    store = StreakStore(client)
+    await store.mark("1", "42", False, now=1000)
+    assert client.calls == [("POST", "/streaks/1/mark", {
+        "now": 1000, "marks": [{"user_id": "42", "repping": False}],
+    })]
+
+
+# --------------------------------------------------------------------------- #
+# Types on the way to the store. The Worker screens ids with isSafeInteger and
+# requires a strict boolean, so an int or a truthy non-bool that reaches it is
+# a 400, and a real 19-digit snowflake sent as a JSON number loses precision
+# before it gets there (that is why the Worker screens them at all). These
+# conversions are the bot's half of that contract, and every existing caller
+# already passes clean strings, so dropping them changed nothing the suite
+# could see.
+# --------------------------------------------------------------------------- #
+
+
+async def test_marks_are_normalised_before_they_reach_the_store():
+    client = FakeClient()
+    store = StreakStore(client)
+    # An int guild id, int snowflakes, and truthy/falsy non-bools.
+    await store.mark_many(1, [(987654321098745632, 1), (42, 0)], now=1000)
+
+    assert client.calls == [("POST", "/streaks/1/mark", {
+        "now": 1000,
+        "marks": [
+            {"user_id": "987654321098745632", "repping": True},
+            {"user_id": "42", "repping": False},
+        ],
+    })]
+    marks = client.calls[0][2]["marks"]
+    assert all(isinstance(m["user_id"], str) for m in marks)
+    assert all(m["repping"] is True or m["repping"] is False for m in marks)
+
+
+async def test_set_role_normalises_both_ids():
+    client = FakeClient()
+    cfg = GuildConfig(client)
+    await cfg.set_role(900000000000000001, 800000000000000001)
+
+    assert client.calls == [
+        ("PUT", "/guilds/900000000000000001", {"role_id": "800000000000000001"}),
+    ]
+    assert isinstance(client.calls[0][2]["role_id"], str)
+    # The write-through cache holds the converted value, not the int.
+    assert await cfg.get_role(900000000000000001) == "800000000000000001"
+
+
+async def test_listed_guilds_are_normalised_to_strings():
+    client = FakeClient({("GET", "/guilds"): {"guilds": [[1, 10], [2, 20]]}})
+    cfg = GuildConfig(client)
+    assert await cfg.all_guilds() == [("1", "10"), ("2", "20")]
+
+
+async def test_disable_reports_a_real_boolean():
+    """Callers branch on this, and the store is free to answer 1 or 0."""
+    client = FakeClient({("POST", "/guilds/1/disable"): {"was_configured": 1}})
+    cfg = GuildConfig(client)
+    result = await cfg.disable("1")
+    assert result is True
+
+    client.responses[("POST", "/guilds/2/disable")] = {}
+    assert await cfg.disable("2") is False
+
+
+async def test_leaderboard_defaults_to_a_top_ten():
+    """/leaderboard passes limit explicitly, so the default is API surface only."""
+    rows = [{"user_id": str(i), "total_seconds": i} for i in range(1, 26)]
+    client = FakeClient({("GET", "/streaks/5"): {"rows": rows}})
+    store = StreakStore(client)
+    top = await store.leaderboard("5", "total", now=100)
+    assert len(top) == 10
+    assert top[0] == ("25", 25)
+
+
+def test_leaderboard_entries_are_rendered_as_mentionable_strings():
+    """<@{user_id}> only resolves for the id as text, and rank() promises str."""
+    rows = [{"user_id": 987654321098745632, "total_seconds": 60}]
+    assert rank(rows, "total", 10, 100) == [("987654321098745632", 60)]
+    assert isinstance(rank(rows, "total", 10, 100)[0][0], str)
+
+
 def test_future_streak_time_cannot_produce_negative_totals():
     assert summarize({"active_since": 200, "total_seconds": 20, "longest_seconds": 10}, 100) == {
         "current": 0, "longest": 10, "total": 20, "active": True,
@@ -189,6 +282,13 @@ def test_leaderboard_excludes_zero_scores_and_honors_limit():
 @pytest.mark.parametrize("seconds,expected", [
     (0, "less than a minute"), (59, "less than a minute"), (60, "1m"),
     (3599, "59m"), (3600, "1h"), (86400, "1d"), (86460, "1d"),
+    # The second either side of a day. Without 86399 the day divisor can be
+    # off by one and every case above still reads correctly, because 86400
+    # renders as "1d" under both.
+    (86399, "23h 59m"), (86401, "1d"),
+    # Days and hours are both shown, but minutes are dropped once a duration
+    # spans days, so this is "1d" and not "1d 1m".
+    (90000, "1d 1h"), (86520, "1d"),
 ])
 def test_reward_duration_display_boundaries(seconds, expected):
     assert humanize(seconds) == expected
