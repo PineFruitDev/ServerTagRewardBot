@@ -8,7 +8,17 @@ import re
 import sys
 from datetime import datetime, timezone
 
-_SECRET_KEY = re.compile(r"token|secret|password|credential|api.?key", re.I)
+# Matched against environment variable *names* to decide whose values must
+# never appear in output. "api.?key" alone missed TAGBOT_STORE_KEY, the store's
+# bearer secret, so any name ending in _KEY counts too.
+_SECRET_KEY = re.compile(r"token|secret|password|credential|api.?key|_key$|^key$", re.I)
+
+# Values below this are not redacted by substring match. A credential-named
+# variable holding something tiny (SORT_KEY=id, TOKEN=1) would otherwise rewrite
+# every log line containing those characters, which corrupts the output it is
+# meant to protect. Real credentials are far longer than this, and the
+# _CREDENTIAL pattern below still covers a short value written as "token=x".
+_MIN_REDACTABLE = 8
 _CREDENTIAL = re.compile(
     r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?(?:bearer\s+|bot\s+)?"
     r"|(?:token|secret|password|api[_-]?key)[\"']?\s*[:=]\s*[\"']?)"
@@ -20,7 +30,8 @@ _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
 def _redact(value: str) -> str:
     # Read at emission time so credentials loaded after logger creation are covered.
     secrets = sorted(
-        (v for k, v in os.environ.items() if v and _SECRET_KEY.search(k)),
+        (v for k, v in os.environ.items()
+         if len(v) >= _MIN_REDACTABLE and _SECRET_KEY.search(k)),
         key=len, reverse=True,
     )
     for secret in secrets:

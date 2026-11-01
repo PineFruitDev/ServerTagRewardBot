@@ -4,11 +4,19 @@ Ensures all required environment variables are present and valid before
 the bot starts, with helpful error messages when they aren't. Per-guild
 settings (reward roles) and streaks live in tagbot-store (Cloudflare D1),
 reached via TAGBOT_STORE_URL with the TAGBOT_STORE_KEY bearer secret.
+
+Two rules shape the reporting. Every setting is checked before anything is
+raised, because a fresh deployment usually has more than one thing wrong and
+one restart per problem is a miserable way to discover that. And no message
+ever echoes a value, not even a masked fragment of one: a startup log or a
+pasted CI transcript has to stay safe to share, so a bad setting is described
+by name and by what was expected instead.
 """
 
 import os
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from src.services.logger import get_logger
 
@@ -29,10 +37,34 @@ OPTIONAL_VARS = {
     "MEMBERS_INTENT": "true",
 }
 
+#: What Config.is_development and Config.is_production compare against. A value
+#: outside the set is reported and then read as production, which is what every
+#: current consumer already does with it.
+ENVIRONMENTS = ("development", "production")
+
 _BOOL_TRUE = ("true", "1", "yes", "on")
 _BOOL_FALSE = ("false", "0", "no", "off")
 
+_BOOL_VARS = ("SYNC_ON_START", "MEMBERS_INTENT")
+
 _SNOWFLAKE = re.compile(r"^\d{17,20}$")
+
+#: What to say when a required setting is missing. Kept beside REQUIRED_VARS so
+#: a new required var cannot be added without telling operators where to get it.
+_EXPECTED = {
+    "DISCORD_TOKEN": "the bot token from the Discord Developer Portal",
+    "TAGBOT_STORE_URL": "the https:// URL of your deployed tagbot-store Worker",
+    "TAGBOT_STORE_KEY": "the bearer secret shared with that Worker",
+}
+
+_TOKEN_MIN_LENGTH = 50
+_STORE_KEY_MIN_LENGTH = 32
+
+# A full sync waits this long before every member re-fetch, so the value is
+# multiplied by the member count. Past a second each it is more likely a typo
+# (350000 for 350) than a deliberate throttle, which is worth saying out loud
+# without refusing to start over it.
+_SYNC_DELAY_WARN_MS = 1000
 
 
 @dataclass
@@ -63,43 +95,19 @@ class Environment:
         """Validate all environment variables. Raises SystemExit on failure."""
         log.info("validate - Validating environment variables...")
 
-        missing = []
-        invalid = []
+        cls._apply_defaults()
+        problems = cls._check_required() + cls._check_optional()
 
-        for name in REQUIRED_VARS:
-            value = os.getenv(name)
-            if not value:
-                missing.append(name)
-                continue
-            if name == "DISCORD_TOKEN" and not cls._is_valid_token(value):
-                invalid.append(f"{name} (invalid format)")
-            if name == "TAGBOT_STORE_URL" and not (value.startswith("https://") or _LOCAL_HTTP.match(value)):
-                invalid.append(f"{name} (must be https://)")
-            if name == "TAGBOT_STORE_KEY" and len(value) < 32:
-                invalid.append(f"{name} (too short)")
-
-        for name, default in OPTIONAL_VARS.items():
-            if not os.getenv(name):
-                os.environ[name] = default
-                log.info("validate - Set default for %s: %s", name, default)
-
-        for dev_id in cls._split_ids(os.getenv("DEVELOPER_IDS", "")):
-            if not _SNOWFLAKE.match(dev_id):
-                invalid.append(f"DEVELOPER_IDS contains invalid ID: {dev_id}")
-
-        if os.getenv("MEMBERS_INTENT", "true").strip().lower() not in _BOOL_TRUE + _BOOL_FALSE:
-            invalid.append("MEMBERS_INTENT (must be true or false)")
-
-        if not os.getenv("SYNC_DELAY_MS", "350").isdigit():
-            invalid.append("SYNC_DELAY_MS (must be a non-negative number)")
-
-        if missing:
-            log.error("validate - Missing required environment variables: %s", ", ".join(missing))
-            raise SystemExit(f"Missing required environment variables: {', '.join(missing)}")
-
-        if invalid:
-            log.error("validate - Invalid environment variables: %s", ", ".join(invalid))
-            raise SystemExit(f"Invalid environment variables: {', '.join(invalid)}")
+        if problems:
+            for problem in problems:
+                log.error("validate - %s", problem)
+            listed = "\n".join(f"  - {problem}" for problem in problems)
+            raise SystemExit(
+                f"ServerTagRewardBot did not start: {len(problems)} configuration problem(s).\n"
+                f"{listed}\n"
+                "See the Environment Variables table in README.md. No values are shown above "
+                "on purpose; check them in your .env or secret manager."
+            )
 
         log.info("validate - Environment validation passed ✅")
         cls._log_environment_info()
@@ -108,30 +116,148 @@ class Environment:
     def get_config(cls) -> Config:
         if cls._config is None:
             cls._config = Config(
-                discord_token=os.environ["DISCORD_TOKEN"],
-                environment=os.getenv("ENVIRONMENT", "production"),
-                sync_on_start=os.getenv("SYNC_ON_START", "true").lower() == "true",
-                sync_delay_ms=int(os.getenv("SYNC_DELAY_MS", "350")),
-                members_intent=os.getenv("MEMBERS_INTENT", "true").strip().lower() in _BOOL_TRUE,
-                developer_ids=cls._split_ids(os.getenv("DEVELOPER_IDS", "")),
+                discord_token=cls._setting("DISCORD_TOKEN"),
+                environment=cls._setting("ENVIRONMENT", "production").lower(),
+                sync_on_start=cls._as_bool("SYNC_ON_START", default=False),
+                sync_delay_ms=int(cls._setting("SYNC_DELAY_MS", "350")),
+                members_intent=cls._as_bool("MEMBERS_INTENT", default=True),
+                developer_ids=cls._split_ids(cls._setting("DEVELOPER_IDS")),
             )
         return cls._config
+
+    @classmethod
+    def _apply_defaults(cls) -> None:
+        """Fill in every unset optional var so later checks can read them directly.
+
+        A blank or whitespace-only value counts as unset, the same way the
+        required checks read it: `SYNC_ON_START=` in a .env is an unfinished
+        line, not a request for different behaviour.
+        """
+        for name, default in OPTIONAL_VARS.items():
+            if not cls._setting(name):
+                os.environ[name] = default
+                log.info("validate - Set default for %s: %s", name, default)
+
+    @classmethod
+    def _check_required(cls) -> list[str]:
+        """Report each required setting that is missing or unusable."""
+        problems = []
+        for name in REQUIRED_VARS:
+            value = cls._setting(name)
+            if not value:
+                problems.append(f"{name} is required but not set ({_EXPECTED[name]})")
+                continue
+            # Surrounding whitespace survives a copy-paste or a quoted .env line
+            # and would otherwise reach Discord inside the token. Normalise it
+            # here so every consumer reads the trimmed value.
+            os.environ[name] = value
+            unusable = cls._unusable(name, value)
+            if unusable:
+                problems.append(f"{name} is set but unusable: {unusable}")
+        return problems
+
+    @classmethod
+    def _check_optional(cls) -> list[str]:
+        """Report each optional setting whose value cannot be interpreted."""
+        problems = []
+
+        # An unrecognised ENVIRONMENT is a warning, not a failure: everything
+        # that reads it (currently just the log level) already treats anything
+        # other than "development" as production, so refusing to boot over
+        # ENVIRONMENT=staging would be an outage with nothing behind it.
+        environment = cls._setting("ENVIRONMENT").lower()
+        if environment not in ENVIRONMENTS:
+            log.warning("validate - ENVIRONMENT is not one of %s; treating it as production",
+                        ", ".join(ENVIRONMENTS))
+
+        for name in _BOOL_VARS:
+            if cls._setting(name).lower() not in _BOOL_TRUE + _BOOL_FALSE:
+                problems.append(f"{name} must be a boolean "
+                                f"({'/'.join(_BOOL_TRUE)} or {'/'.join(_BOOL_FALSE)})")
+
+        delay = cls._setting("SYNC_DELAY_MS")
+        if not delay.isdigit():
+            problems.append("SYNC_DELAY_MS must be a whole number of milliseconds, 0 or more")
+        elif int(delay) > _SYNC_DELAY_WARN_MS:
+            # Deliberately not an error. A long throttle only makes a
+            # background sync slower, and the one thing worse than a slow sync
+            # is an operator who has to raise their request rate against the
+            # Discord API to get the bot to start.
+            log.warning("validate - SYNC_DELAY_MS is %s ms, applied before every member "
+                        "re-fetch; a full sync of a large server will take hours", delay)
+
+        # Position rather than value: an ID pasted into the wrong variable could
+        # be a credential, and this message goes to the logs.
+        for position, dev_id in enumerate(cls._split_ids(cls._setting("DEVELOPER_IDS")), start=1):
+            if not _SNOWFLAKE.match(dev_id):
+                problems.append(f"DEVELOPER_IDS entry {position} is not a Discord user ID "
+                                "(17-20 digits, from Discord's Developer Mode > Copy User ID)")
+
+        return problems
+
+    @classmethod
+    def _unusable(cls, name: str, value: str) -> str | None:
+        """Why a required value cannot be used, or None when it is fine."""
+        if name == "DISCORD_TOKEN":
+            # Length and shape only. A near-miss token is still a live
+            # credential, so nothing about the value is quoted back.
+            if len(value) <= _TOKEN_MIN_LENGTH or "." not in value:
+                return (f"a bot token is a dotted string longer than {_TOKEN_MIN_LENGTH} characters "
+                        "(Developer Portal > Bot > Reset Token, copied whole)")
+        elif name == "TAGBOT_STORE_URL":
+            return cls._unusable_store_url(value)
+        elif name == "TAGBOT_STORE_KEY":
+            if len(value) < _STORE_KEY_MIN_LENGTH:
+                # The length of an already-rejected key is the one detail that
+                # distinguishes a truncated paste from the wrong variable.
+                return (f"expected at least {_STORE_KEY_MIN_LENGTH} characters, got {len(value)}; "
+                        "this is the Worker's bearer secret, not the Discord token")
+        return None
+
+    @staticmethod
+    def _unusable_store_url(value: str) -> str | None:
+        if _LOCAL_HTTP.match(value):
+            return None
+        parts = urlsplit(value)
+        if parts.scheme != "https":
+            return ("must be an https:// URL; plain http is only accepted for a local "
+                    "wrangler dev store on localhost or 127.0.0.1")
+        if not parts.hostname:
+            return "looks like an https:// URL but has no hostname"
+        return None
+
+    @staticmethod
+    def _setting(name: str, default: str = "") -> str:
+        """The configured value, trimmed. Blank and unset are the same thing."""
+        return os.getenv(name, default).strip() or default.strip()
+
+    @classmethod
+    def _as_bool(cls, name: str, *, default: bool) -> bool:
+        """Read one of the boolean settings. validate() rejects anything else."""
+        raw = cls._setting(name).lower()
+        if raw in _BOOL_TRUE:
+            return True
+        if raw in _BOOL_FALSE:
+            return False
+        return default
 
     @staticmethod
     def _split_ids(raw: str) -> list[str]:
         return [part.strip() for part in raw.split(",") if part.strip()]
 
-    @staticmethod
-    def _is_valid_token(token: str) -> bool:
-        # Bot tokens are long, dotted strings; catch obvious paste mistakes early
-        return len(token) > 50 and "." in token
-
     @classmethod
     def _log_environment_info(cls) -> None:
-        token = os.environ["DISCORD_TOKEN"]
-        masked = token[:6] + "***" + token[-4:] if len(token) >= 10 else "***"
-        log.info("validate - Environment: %s", os.getenv("ENVIRONMENT"))
-        log.info("validate - Discord Token: %s", masked)
-        dev_ids = cls._split_ids(os.getenv("DEVELOPER_IDS", ""))
+        """Confirm what is configured without reproducing any of it.
+
+        The token and the store key are absent by design, including as masked
+        prefixes. A fragment is enough to correlate a leaked credential, and it
+        slips past the logger's redaction (which can only match whole values),
+        so "present" is all this line is allowed to say.
+        """
+        log.info("validate - Environment: %s", cls._setting("ENVIRONMENT"))
+        log.info("validate - Discord token: present, format accepted (value not logged)")
+        log.info("validate - Store key: present, format accepted (value not logged)")
+        log.info("validate - Store host: %s", urlsplit(cls._setting("TAGBOT_STORE_URL")).hostname)
+        dev_ids = cls._split_ids(cls._setting("DEVELOPER_IDS"))
         if dev_ids:
             log.info("validate - Developer IDs configured: %d", len(dev_ids))

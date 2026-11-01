@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src.services import tasks
 from src.services.environment import Config, Environment, OPTIONAL_VARS, REQUIRED_VARS
 from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreClient
@@ -30,6 +31,9 @@ def isolated_state(monkeypatch):
     for service in (GuildConfig, StoreClient, StreakStore, TagSyncService):
         monkeypatch.setattr(service, "_instance", None)
     monkeypatch.setattr(Environment, "_config", None)
+    # A test that drains background work must not leave spawn() closed for the
+    # rest of the session.
+    monkeypatch.setattr(tasks, "_closing", False)
 
 
 # --------------------------------------------------------------------------- #

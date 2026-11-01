@@ -70,6 +70,35 @@ python register.py   # Register commands with Discord
 python main.py       # Start the bot
 ```
 
+Startup validates every setting before it opens a connection, and reports all
+the problems it found at once rather than one per restart:
+
+```
+ServerTagRewardBot did not start: 2 configuration problem(s).
+  - DISCORD_TOKEN is required but not set (the bot token from the Discord Developer Portal)
+  - TAGBOT_STORE_URL is set but unusable: must be an https:// URL; plain http is only
+    accepted for a local wrangler dev store on localhost or 127.0.0.1
+```
+
+No value is ever printed back, not even a masked fragment of one, so startup
+output and CI logs stay safe to paste into an issue.
+
+### Stopping the bot
+
+Ctrl-C (`SIGINT`) and a supervisor's `SIGTERM` both shut down gracefully:
+the bot stops accepting new background work, lets any sync already in flight
+finish (up to 5 seconds), then closes the gateway connection and the HTTPS
+session to the store. A sync interrupted halfway through a server's members
+loses nothing that was already written, but the next start has to rediscover
+where it got to, which is what the drain avoids. Work still running when the
+grace period expires is cancelled and logged, so a wedged sync cannot hold the
+process open past a supervisor's own kill timeout.
+
+The grace period is deliberately shorter than the 10 seconds Docker allows
+before `SIGKILL`, leaving room for the close itself. If you run with a tighter
+`--stop-timeout`, lower `DRAIN_TIMEOUT` in `src/services/lifecycle.py` to
+match, or the process can be killed partway through the clean close.
+
 ## Project Structure
 
 ```
@@ -93,7 +122,9 @@ src/
     ├── streaks.py            # Streak tracking (tagbot-store)
     ├── logger.py             # Structured JSON logging with credential redaction
     ├── discord_errors.py     # Classifies Discord API failures (fixable vs transient)
-    └── environment.py        # Config validation
+    ├── lifecycle.py          # Graceful shutdown on SIGINT/SIGTERM
+    ├── tasks.py              # Background task supervision and shutdown drain
+    └── environment.py        # Startup config validation
 main.py                       # Entry point
 register.py                   # Command registration
 ```
@@ -116,16 +147,25 @@ The Worker also requires the `TAGBOT_STORE_KEY` secret and the `DB` D1 binding
 configured in `worker/wrangler.toml`. Registration contacts Discord; run it
 only when you intend to update the application’s slash commands.
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_TOKEN` | ✅ | Bot token from Discord Developer Portal |
-| `DEVELOPER_IDS` | ❌ | Comma-separated user IDs for developer commands |
-| `ENVIRONMENT` | ❌ | Environment mode |
-| `SYNC_ON_START` | ❌ | Sync all configured servers at startup; /setup offers the first sync |
-| `SYNC_DELAY_MS` | ❌ | Throttle between user re-fetches during sync |
-| `TAGBOT_STORE_URL` | ✅ | HTTPS URL of the tagbot-store Worker |
-| `TAGBOT_STORE_KEY` | ✅ | Bearer secret for the Worker (keep in a secrets manager) |
-| `MEMBERS_INTENT` | ❌ | Request the Server Members intent; falls back to limited mode if refused |
+| Variable | Required | Accepted values | Description |
+|----------|----------|-----------------|-------------|
+| `DISCORD_TOKEN` | ✅ | dotted string, 50+ characters | Bot token from Discord Developer Portal |
+| `DEVELOPER_IDS` | ❌ | comma-separated 17-20 digit IDs | User IDs for developer commands |
+| `ENVIRONMENT` | ❌ | `development` or `production` (default) | Environment mode; sets the log level. Anything else is logged and read as `production` |
+| `SYNC_ON_START` | ❌ | boolean (default `false`) | Sync all configured servers at startup; /setup offers the first sync |
+| `SYNC_DELAY_MS` | ❌ | whole milliseconds (default `350`) | Throttle before each user re-fetch during sync. Over `1000` is logged as a likely typo, since it applies per member, but is honoured |
+| `TAGBOT_STORE_URL` | ✅ | `https://` URL, or `http://localhost` for `wrangler dev` | HTTPS URL of the tagbot-store Worker |
+| `TAGBOT_STORE_KEY` | ✅ | 32+ characters | Bearer secret for the Worker (keep in a secrets manager) |
+| `MEMBERS_INTENT` | ❌ | boolean (default `true`) | Request the Server Members intent; falls back to limited mode if refused |
+
+Booleans accept `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off`, in any case.
+A blank value is treated as unset and takes the default; anything unparseable
+fails startup rather than being quietly read as `false`.
+
+> **If you are upgrading:** `SYNC_ON_START` previously recognised only the
+> literal `true`, so `SYNC_ON_START=yes`, `on` or `1` meant *off*. Those forms
+> now mean *on*, as documented, and the next restart will sync every configured
+> server. Set it to `false` first if you do not want that.
 
 ## License Note
 This project is licensed under **[Apache 2.0](https://choosealicense.com/licenses/apache-2.0/) + the [Commons Clause](https://commonsclause.com/)**. In plain terms:
