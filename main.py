@@ -12,7 +12,7 @@ from src.services.environment import Config, Environment
 from src.services.guild_config import GuildConfig
 from src.services.streaks import StreakStore
 from src.services.store_client import StoreClient, StoreError
-from src.services.logger import get_logger
+from src.services.logger import configure_library_logging, get_logger
 from src.services.tag_sync import TagSyncService
 from src.services.tasks import spawn
 
@@ -84,6 +84,11 @@ async def run(config: Config) -> None:
 def main() -> None:
     Environment.validate()
     config = Environment.get_config()
+
+    # discord.py reports rate limits and gateway trouble on its own loggers.
+    # Adopt them before connecting so those lines arrive structured and
+    # redacted rather than raw on stderr.
+    configure_library_logging()
 
     log.info("Initializing bot with %d commands", len(ALL_COMMANDS))
 

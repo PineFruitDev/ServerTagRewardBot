@@ -49,6 +49,16 @@ class SyncCommand(Command):
         await interaction.response.defer(ephemeral=True)
         stats = await service.full_sync(guild_id)
 
+        if stats.role_blocked is not None:
+            await interaction.followup.send(
+                f"⚠️ **Sync stopped early:** I can't manage the reward role here "
+                f"({stats.role_blocked}).\n"
+                f"Give me **Manage Roles**, and make sure my own highest role sits above the "
+                f"reward role in Server Settings > Roles, then run /sync again.\n"
+                f"👥 **Members checked before stopping:** {stats.members_checked}"
+            )
+            return
+
         await interaction.followup.send(
             f"✅ **Sync complete**\n"
             f"👥 **Members checked:** {stats.members_checked}\n"

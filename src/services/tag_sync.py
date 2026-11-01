@@ -13,9 +13,11 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 import discord
 
+from src.services.discord_errors import blocks_whole_guild, describe
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.logger import get_logger
@@ -58,6 +60,10 @@ class GuildStats:
     currently_repping: int = 0
     live_updates: int = 0
     last_sync_at: datetime | None = field(default=None)
+    #: Set when a role write failed in a way that affects the whole guild (see
+    #: discord_errors.blocks_whole_guild). A full sync stops on it instead of
+    #: repeating a doomed call per member, and commands report it.
+    role_blocked: str | None = field(default=None)
 
 
 class TagSyncService:
@@ -167,8 +173,13 @@ class TagSyncService:
                         guild_id, len(marks), exc)
 
     async def apply_role(self, guild_id: str, role_id: str, user_id: str,
-                         should_have: bool, current_roles=None) -> None:
-        """Add or remove the reward role, skipping redundant API calls when possible."""
+                         should_have: bool, current_roles=None) -> bool:
+        """Add or remove the reward role, skipping redundant API calls when possible.
+
+        Returns True when the member's role state is correct afterwards, False
+        when Discord refused. Never raises: this runs on every member update,
+        so a failure is reported and contained rather than propagated.
+        """
         # role_id comes from the store and the ids from a gateway payload. A
         # single unparseable value would otherwise raise ValueError out of here
         # on every member update, so reject it once and keep going.
@@ -176,7 +187,7 @@ class TagSyncService:
         if guild_ref is None or user_ref is None or role_ref is None:
             log.error("apply_role - [%s] Skipped: ids must be numeric (user=%r, role=%r)",
                       guild_id, user_id, role_id)
-            return
+            return False
 
         has_role = None
         if isinstance(current_roles, list):
@@ -193,7 +204,19 @@ class TagSyncService:
                 stats.roles_removed += 1
                 log.info("apply_role - [%s] Removed role from %s", guild_id, user_id)
         except discord.HTTPException as exc:
-            log.error("apply_role - [%s] Failed for %s: %s", guild_id, user_id, exc)
+            # describe() puts the status in the message text: passing the
+            # exception as a log argument would render it as "HTTPException"
+            # and lose the one detail that tells these cases apart.
+            detail = describe(exc)
+            if blocks_whole_guild(exc):
+                stats.role_blocked = detail
+                log.error("apply_role - [%s] Cannot manage role %s (%s). Check that I have Manage "
+                          "Roles and that my highest role is above it.", guild_id, role_id, detail)
+            else:
+                log.warning("apply_role - [%s] Role update failed for %s (%s)",
+                            guild_id, user_id, detail)
+            return False
+        return True
 
     async def full_sync(self, guild_id: str) -> GuildStats:
         """Walk every member of one guild and reconcile the reward role.
@@ -218,9 +241,12 @@ class TagSyncService:
             checked = repping = 0
             after = 0
             marks: list[tuple[str, bool]] = []
+            # A fresh attempt re-tests the role: an admin may have fixed the
+            # permissions since the last run.
+            stats.role_blocked = None
 
             while True:
-                batch = await self._client.http.get_members(int(guild_id), limit=1000, after=after)
+                batch = await self._fetch_members(guild_id, after)
                 if not batch:
                     break
 
@@ -228,7 +254,7 @@ class TagSyncService:
                 for member in batch:
                     listed = member.get("user") if isinstance(member, dict) else None
                     member_id = snowflake(listed.get("id")) if isinstance(listed, dict) else None
-                    if member_id is None:
+                    if not isinstance(listed, dict) or member_id is None:
                         # One unusable row must not abandon the rest of the guild.
                         log.warning("full_sync - [%s] Skipped a member with no usable id", guild_id)
                         continue
@@ -237,12 +263,13 @@ class TagSyncService:
 
                     user = listed
                     if "primary_guild" not in user:
-                        try:
-                            fetched = await self._client.http.get_user(int(member_id))
-                        except discord.HTTPException:
-                            continue
+                        fetched = await self._refetch_user(guild_id, member_id)
+                        # Throttle whether or not the fetch worked. When a rate
+                        # limit or an outage fails every member, skipping the
+                        # delay would spin this loop at full speed into an API
+                        # that is already struggling.
                         await asyncio.sleep(config.sync_delay_ms / 1000)
-                        if not isinstance(fetched, dict):
+                        if fetched is None:
                             continue
                         user = fetched
 
@@ -251,10 +278,20 @@ class TagSyncService:
                         repping += 1
                     marks.append((member_id, should_have))
                     await self.apply_role(guild_id, role_id, member_id, should_have, member.get("roles"))
+                    if stats.role_blocked is not None:
+                        break
 
                 # Batched: one store request per 50 members instead of one each
                 await self._record_streaks(guild_id, marks)
                 marks = []
+
+                if stats.role_blocked is not None:
+                    # Every remaining member would fail the same way, so stop
+                    # rather than spend thousands of calls proving it. The work
+                    # done so far is kept and reported.
+                    log.error("full_sync - [%s] Stopped after %d members: role is unmanageable (%s)",
+                              guild_id, checked, stats.role_blocked)
+                    break
 
                 if len(batch) < 1000:
                     break
@@ -271,6 +308,32 @@ class TagSyncService:
             log.info("full_sync - [%s] Complete: %d members checked, %d repping", guild_id, checked, repping)
 
         return stats
+
+    async def _fetch_members(self, guild_id: str, after: int) -> list:
+        """One page of the guild member list.
+
+        Re-raises: an unfinished sync must not record a last_sync_at, and the
+        caller turns the failure into a specific reply. Logged here because the
+        status code is the only thing separating a withdrawn members intent
+        from a transient outage, and describe() is the only way to keep it.
+        """
+        try:
+            return await self._client.http.get_members(int(guild_id), limit=1000, after=after)
+        except discord.HTTPException as exc:
+            log.error("full_sync - [%s] Member list request failed (%s)", guild_id, describe(exc))
+            raise
+
+    async def _refetch_user(self, guild_id: str, member_id: str) -> dict | None:
+        """One member's user payload, or None when Discord would not give it up."""
+        try:
+            # Annotated User by the stubs, but the HTTP layer returns the raw
+            # payload, so it is shape checked below rather than trusted.
+            fetched: Any = await self._client.http.get_user(int(member_id))
+        except discord.HTTPException as exc:
+            log.warning("full_sync - [%s] Could not refetch member %s (%s)",
+                        guild_id, member_id, describe(exc))
+            return None
+        return fetched if isinstance(fetched, dict) else None
 
     async def safe_full_sync(self, guild_id: str) -> None:
         """full_sync for background tasks: logs failures instead of losing them."""

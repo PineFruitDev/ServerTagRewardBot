@@ -158,6 +158,116 @@ async def test_retryable_statuses_use_bounded_exponential_backoff(monkeypatch, s
         await server.close()
 
 
+async def _retry_after_run(header, monkeypatch, status=429, attempts=2):
+    """Serve one `status` carrying `header`, then a 200.
+
+    Returns (recorded sleep mock, client, server); the caller closes both.
+    """
+    from unittest.mock import AsyncMock
+
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.services.store_client.asyncio.sleep", sleep)
+    monkeypatch.setattr("src.services.store_client.random.random", lambda: 0.5)
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return web.json_response({}, status=status, headers={"Retry-After": header})
+        return web.json_response({"ok": True})
+
+    server = await _serve(handler)
+    return sleep, _client(server, attempts=attempts, backoff=0.25), server
+
+
+@pytest.mark.parametrize("header,expected", [
+    # The numeric form Cloudflare sends on a 429.
+    ("2", 2.0),
+    ("0", 0.0),
+    ("7.5", 7.5),
+    (" 3 ", 3.0),
+])
+async def test_retry_after_seconds_is_honoured_over_the_guess(monkeypatch, header, expected):
+    sleep, client, server = await _retry_after_run(header, monkeypatch)
+    try:
+        assert await client.get("/health") == {"ok": True}
+        # 0.25 would be the computed backoff; the store's own figure wins.
+        assert [c.args[0] for c in sleep.await_args_list] == [expected]
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def test_retry_after_http_date_is_honoured(monkeypatch):
+    """RFC 9110 allows an HTTP-date instead of a count of seconds."""
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+
+    when = datetime.now(timezone.utc) + timedelta(seconds=5)
+    sleep, client, server = await _retry_after_run(format_datetime(when), monkeypatch)
+    try:
+        assert await client.get("/health") == {"ok": True}
+        waited = sleep.await_args_list[0].args[0]
+        # Computed against the clock, so allow for the round trip.
+        assert 2.0 <= waited <= 6.0
+    finally:
+        await client.close()
+        await server.close()
+
+
+@pytest.mark.parametrize("header", ["soon", "", "-", "Tue, 99 Xxx 2026 99:99:99 GMT"])
+async def test_unparseable_retry_after_falls_back_to_backoff(monkeypatch, header):
+    """An unreadable header must not become a zero wait that retries instantly."""
+    sleep, client, server = await _retry_after_run(header, monkeypatch)
+    try:
+        assert await client.get("/health") == {"ok": True}
+        assert [c.args[0] for c in sleep.await_args_list] == [0.25]
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def test_a_retry_after_past_the_cap_fails_fast_instead_of_hanging(monkeypatch):
+    """Sitting on a deferred interaction for minutes is worse than failing."""
+    sleep, client, server = await _retry_after_run("600", monkeypatch)
+    try:
+        with pytest.raises(StoreUnavailable, match="600s wait"):
+            await client.get("/health")
+        sleep.assert_not_awaited()
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def test_retry_after_only_governs_the_response_that_sent_it(monkeypatch):
+    """A later attempt without the header goes back to the computed backoff."""
+    from unittest.mock import AsyncMock
+
+    sleep = AsyncMock()
+    monkeypatch.setattr("src.services.store_client.asyncio.sleep", sleep)
+    monkeypatch.setattr("src.services.store_client.random.random", lambda: 0.5)
+    calls = 0
+
+    async def handler(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return web.json_response({}, status=429, headers={"Retry-After": "3"})
+        return web.json_response({}, status=503)
+
+    server = await _serve(handler)
+    client = _client(server, attempts=3, backoff=0.25)
+    try:
+        with pytest.raises(StoreUnavailable):
+            await client.get("/health")
+        # First wait came from the header, second from exponential backoff.
+        assert [c.args[0] for c in sleep.await_args_list] == [3.0, 0.5]
+    finally:
+        await client.close()
+        await server.close()
+
+
 @pytest.mark.parametrize("body", ["null", "[]", '"denied"', "{", "not-json"])
 async def test_unexpected_error_body_still_maps_to_store_error(body):
     calls = 0
