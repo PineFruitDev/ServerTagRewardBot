@@ -1,6 +1,6 @@
 # ServerTagRewardBot
 
-Reward your community for repping your server. This public bot grants a role the moment a member equips your server's tag and removes it when they stop, keeping tag adoption and role perks perfectly in sync. Invite it, run `/setup`, done.
+Reward members across the UGC space for representing your Discord community, from creators and game communities to studios and fan groups. This public bot grants a role the moment a member equips your server's tag and removes it when they stop, keeping tag adoption and role perks perfectly in sync. Invite it, run `/setup`, done.
 
 [Visit Tag Rewards on Modulix](https://bots.modulix.gg/tag-rewards) for the hosted bot.
 
@@ -38,28 +38,24 @@ The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when th
 
 ### 1. Setup
 
+Use Python 3.12 or 3.13. Node.js 22 is also required for Worker development
+and tests. Run the commands below from the repository root. On Windows,
+activate the virtual environment with `.venv\Scripts\Activate.ps1`.
+
 ```bash
-git clone <your-repo>
+git clone https://github.com/PineFruitDev/ServerTagRewardBot.git
 cd ServerTagRewardBot
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
 ### 2. Configure
 
-Edit `.env` with your bot credentials:
-
-```env
-DISCORD_TOKEN=your_bot_token_here
-DEVELOPER_IDS=your_user_id_here  # Optional
-ENVIRONMENT=development          # Optional
-SYNC_ON_START=true               # Optional
-SYNC_DELAY_MS=350                # Optional
-TAGBOT_STORE_URL=https://tagbot-store.<you>.workers.dev
-TAGBOT_STORE_KEY=<bearer secret, same as the Worker secret>
-MEMBERS_INTENT=true              # Optional
-```
+Configure the variable names listed below in your local `.env` or secret manager.
+Keep credentials out of commits, logs, screenshots, and PR descriptions.
+The test suites do not need a configured `.env` or live credentials.
 
 > **Required Discord setup:** enable the **Server Members Intent** on the Bot page of the [Developer Portal](https://discord.com/developers/applications) and invite with the **Manage Roles** permission.
 >
@@ -67,7 +63,7 @@ MEMBERS_INTENT=true              # Optional
 >
 > **Storage:** deploy the Worker in `worker/` (see `worker/wrangler.toml`), then set `TAGBOT_STORE_URL` and `TAGBOT_STORE_KEY`. `scripts/migrate_sqlite_to_d1.py` imports a legacy `data.db`; `scripts/smoke_test.py` checks a running store.
 
-### 3. Deploy
+### 3. Register and run
 
 ```bash
 python register.py   # Register commands with Discord
@@ -114,16 +110,21 @@ register.py                   # Command registration
 
 ## Environment Variables
 
+Names only; supply credentials privately. The bot loads `.env` at startup.
+The Worker also requires the `TAGBOT_STORE_KEY` secret and the `DB` D1 binding
+configured in `worker/wrangler.toml`. Registration contacts Discord; run it
+only when you intend to update the application’s slash commands.
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DISCORD_TOKEN` | ✅ | Bot token from Discord Developer Portal |
 | `DEVELOPER_IDS` | ❌ | Comma-separated user IDs for developer commands |
-| `ENVIRONMENT` | ❌ | Environment mode (defaults to production) |
-| `SYNC_ON_START` | ❌ | Sync all configured servers at startup (defaults to false; /setup handles first sync) |
-| `SYNC_DELAY_MS` | ❌ | Throttle between user re-fetches during sync (defaults to 350) |
+| `ENVIRONMENT` | ❌ | Environment mode |
+| `SYNC_ON_START` | ❌ | Sync all configured servers at startup; /setup offers the first sync |
+| `SYNC_DELAY_MS` | ❌ | Throttle between user re-fetches during sync |
 | `TAGBOT_STORE_URL` | ✅ | HTTPS URL of the tagbot-store Worker |
 | `TAGBOT_STORE_KEY` | ✅ | Bearer secret for the Worker (keep in a secrets manager) |
-| `MEMBERS_INTENT` | ❌ | Request the Server Members intent (defaults to true; falls back to limited mode if refused) |
+| `MEMBERS_INTENT` | ❌ | Request the Server Members intent; falls back to limited mode if refused |
 
 ## License Note
 This project is licensed under **[Apache 2.0](https://choosealicense.com/licenses/apache-2.0/) + the [Commons Clause](https://commonsclause.com/)**. In plain terms:
@@ -147,6 +148,7 @@ python -m ruff check .
 python -m mypy
 python -m pytest -q --cov=src --cov=scripts --cov-branch --cov-report=term-missing --cov-fail-under=93
 npm --prefix worker ci
+node --check worker/src/index.js
 npm --prefix worker test
 ```
 
