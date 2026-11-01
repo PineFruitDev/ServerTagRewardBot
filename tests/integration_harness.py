@@ -395,6 +395,11 @@ class CommandBot(TagBot):
         command = self.bot.tree.get_command(name)
         assert command is not None, f"/{name} is not registered on the tree"
         interaction = interaction if interaction is not None else FakeInteraction()
+        # discord.py sets Interaction.command to the command being invoked
+        # before it calls the callback. Commands read its name to report on
+        # themselves, and one Command object can register several slash names,
+        # so a hardcoded stand-in would let a test pass on the wrong one.
+        interaction.command = command
         await command.callback(interaction, *args, **kwargs)
         return interaction
 
