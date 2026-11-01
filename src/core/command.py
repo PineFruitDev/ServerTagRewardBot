@@ -135,7 +135,13 @@ class Command(ABC):
         # Authorisation before capability. Someone who may not run the command
         # at all should be told that, not handed a report on the bot's own
         # permission problems.
-        if self.required_user_permissions and interaction.guild is not None:
+        # Not conditioned on being in a guild: guild permissions mean nothing
+        # in a DM, so a command asking for them has nothing to check against
+        # and must refuse. guild_only would catch today's three commands
+        # first, but a future one that forgot it would otherwise be ungated.
+        if self.required_user_permissions:
+            if interaction.guild is None:
+                return False, "This command can only be used in servers."
             held = user_permissions(interaction)
             if held is None:
                 return False, ("I can't read your permissions in this server yet. "

@@ -17,6 +17,7 @@ import discord
 import pytest
 
 from src.commands.setup import SetupCommand, SyncPromptView
+from src.commands.sync import SyncCommand
 from src.core.command import permission_label, user_permissions
 from tests.integration_harness import (GUILD, ROLE, FakeGuild, FakeInteraction, FakeMember,
                                        FakeRole, user_id)
@@ -174,6 +175,22 @@ async def test_an_invoker_whose_permissions_cannot_be_read_is_refused(fresh_ui):
     assert wrote_nothing(fresh_ui)
 
 
+async def test_a_command_asking_for_guild_permissions_refuses_a_dm():
+    """Guild permissions mean nothing in a DM, so there is nothing to check.
+
+    guild_only already rejects DMs for all three of today's commands, so this
+    drives validate() directly. A future command that set
+    required_user_permissions and forgot guild_only would otherwise reach its
+    work in a DM with the invoker gate skipped entirely.
+    """
+    command = SyncCommand()
+    command.guild_only = False
+    valid, reason = await command.validate(FakeInteraction(dm=True))
+
+    assert valid is False
+    assert "only be used in servers" in reason
+
+
 def test_an_unlabelled_permission_still_reads_as_prose():
     assert permission_label("manage_guild") == "Manage Server"
     assert permission_label("moderate_members") == "Moderate Members"
@@ -202,7 +219,7 @@ async def test_an_administrator_role_is_never_the_reward(fresh_ui, held, owned):
         user=invoker(held, top_role=rank(49)),
     ))
 
-    assert "Administrator" in interaction.replied
+    assert "won't hand it out" in interaction.replied
     assert wrote_nothing(fresh_ui)
 
 
