@@ -42,6 +42,37 @@ def test_header_and_json_secret_redaction():
     assert "test-token" not in output
 
 
+@pytest.mark.parametrize("name", ["TAGBOT_STORE_KEY", "DISCORD_TOKEN", "SOME_API_KEY", "KEY"])
+def test_credential_variables_are_redacted_by_name(monkeypatch, name):
+    """The store's bearer secret lives in TAGBOT_STORE_KEY, which "api.?key" missed."""
+    monkeypatch.setenv(name, "synthetic-credential-value")
+    record = logging.LogRecord("test", logging.ERROR, "", 0,
+                               "store rejected synthetic-credential-value", (), None)
+    assert "synthetic-credential-value" not in JsonFormatter().format(record)
+
+
+def test_an_ordinary_setting_is_not_redacted(monkeypatch):
+    """Over-redaction would hide the values an operator needs to debug with."""
+    monkeypatch.setenv("SYNC_DELAY_MS", "350")
+    record = logging.LogRecord("test", logging.INFO, "", 0, "delay is 350ms", (), None)
+    assert "350" in JsonFormatter().format(record)
+
+
+def test_a_tiny_credential_value_does_not_rewrite_every_line(monkeypatch):
+    """SORT_KEY=id must not turn every "id" in the logs into [REDACTED]."""
+    monkeypatch.setenv("SORT_KEY", "id")
+    record = logging.LogRecord("test", logging.INFO, "", 0,
+                               "granted role to member 1234 (valid id)", (), None)
+    assert "valid id" in JsonFormatter().format(record)
+
+
+def test_a_short_value_is_still_redacted_when_labelled(monkeypatch):
+    """The substring guard does not weaken the "token=x" pattern."""
+    monkeypatch.setenv("API_KEY", "abc")
+    record = logging.LogRecord("test", logging.ERROR, "", 0, "sent token=abc", (), None)
+    assert "abc" not in JsonFormatter().format(record)
+
+
 @pytest.mark.parametrize("environment,level", [("development", logging.DEBUG), ("production", logging.INFO)])
 def test_logger_setup(monkeypatch, environment, level):
     monkeypatch.setenv("ENVIRONMENT", environment)
