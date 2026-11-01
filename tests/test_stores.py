@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.services.guild_config import GuildConfig
-from src.services.store_client import StoreUnavailable
+from src.services.store_client import StoreClient, StoreError, StoreUnavailable
 from src.services.streaks import MARK_BATCH, StreakStore, humanize, rank, summarize
 
 
@@ -202,3 +202,45 @@ def test_active_streak_at_epoch_retains_historical_best():
 def test_equal_reward_scores_keep_source_order():
     rows = [{"user_id": uid, "total_seconds": 60} for uid in ("b", "a", "c")]
     assert rank(rows, "total", 2, 100) == [("b", 60), ("a", 60)]
+
+
+# --------------------------------------------------------------------------- #
+# Singleton wiring. main() builds both stores over one StoreClient, while
+# commands and the gateway handlers reach them through get_instance(). If those
+# two halves ever stop agreeing, the bot quietly runs on a second store built
+# from the environment, and nothing else in the suite would notice.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("service", [GuildConfig, StreakStore])
+def test_constructing_a_store_makes_it_the_shared_one(service):
+    store = service(FakeClient())
+    assert service.get_instance() is store
+
+
+@pytest.mark.parametrize("service", [GuildConfig, StreakStore])
+def test_get_instance_builds_the_store_once(service, monkeypatch):
+    monkeypatch.setattr(StoreClient, "get_instance", classmethod(lambda cls: FakeClient()))
+    assert service.get_instance() is service.get_instance()
+
+
+async def test_stores_default_to_the_shared_store_client(monkeypatch):
+    """Neither store should open its own connection to the Worker."""
+    shared = FakeClient({("GET", "/guilds/1"): {"role_id": "10"}})
+    monkeypatch.setattr(StoreClient, "get_instance", classmethod(lambda cls: shared))
+
+    assert await GuildConfig.get_instance().get_role("1") == "10"
+    await StreakStore.get_instance().mark("1", "2", True, now=5)
+
+    assert [call[:2] for call in shared.calls] == [
+        ("GET", "/guilds/1"), ("POST", "/streaks/1/mark"),
+    ]
+
+
+@pytest.mark.parametrize("service", [GuildConfig, StreakStore])
+def test_lazy_store_without_credentials_reports_configuration(service):
+    """An unconfigured host should say which variables are missing."""
+    with pytest.raises(StoreError, match="TAGBOT_STORE_URL"):
+        service.get_instance()
+    # The failed attempt must not leave a half-built store behind.
+    assert service._instance is None

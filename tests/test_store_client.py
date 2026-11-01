@@ -132,6 +132,35 @@ def test_requires_url_and_key(monkeypatch):
         StoreClient()
 
 
+async def test_get_instance_reuses_one_client(monkeypatch):
+    """Every caller shares a connection pool; rebuilding per call would leak sessions."""
+    monkeypatch.setenv("TAGBOT_STORE_URL", "https://store.example")
+    monkeypatch.setenv("TAGBOT_STORE_KEY", KEY)
+
+    client = StoreClient.get_instance()
+    try:
+        assert StoreClient.get_instance() is client
+    finally:
+        await client.close()
+
+
+async def test_a_new_client_becomes_the_shared_one():
+    """main() constructs the client explicitly; get_instance() must hand that one out."""
+    explicit = StoreClient("https://store.example", KEY)
+    try:
+        assert StoreClient.get_instance() is explicit
+    finally:
+        await explicit.close()
+
+
+def test_get_instance_without_credentials_explains_itself(monkeypatch):
+    """Reaching for the store unconfigured should name the variables, not TypeError."""
+    monkeypatch.delenv("TAGBOT_STORE_URL", raising=False)
+    monkeypatch.delenv("TAGBOT_STORE_KEY", raising=False)
+    with pytest.raises(StoreError, match="TAGBOT_STORE_URL"):
+        StoreClient.get_instance()
+
+
 @pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504])
 async def test_retryable_statuses_use_bounded_exponential_backoff(monkeypatch, status):
     from unittest.mock import AsyncMock
@@ -211,6 +240,39 @@ async def test_retry_after_http_date_is_honoured(monkeypatch):
         waited = sleep.await_args_list[0].args[0]
         # Computed against the clock, so allow for the round trip.
         assert 2.0 <= waited <= 6.0
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def test_retry_after_http_date_without_a_zone_is_read_as_utc(monkeypatch):
+    """RFC 9110 requires GMT, but a zoneless date still parses, to a naive datetime.
+
+    Comparing that against an aware "now" raises TypeError, which request()
+    does not catch, so the whole command would die on a header the store only
+    sent to ask for a pause. It has to be assumed UTC instead.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    when = datetime.now(timezone.utc) + timedelta(seconds=5)
+    sleep, client, server = await _retry_after_run(when.strftime("%a, %d %b %Y %H:%M:%S"), monkeypatch)
+    try:
+        assert await client.get("/health") == {"ok": True}
+        waited = sleep.await_args_list[0].args[0]
+        # Read as local time instead, this would be hours out (or negative).
+        assert 2.0 <= waited <= 6.0
+    finally:
+        await client.close()
+        await server.close()
+
+
+async def test_retry_after_date_the_parser_cannot_place_falls_back_to_backoff(monkeypatch):
+    """A date parser that returns nothing instead of raising is still a no-answer."""
+    monkeypatch.setattr("src.services.store_client.parsedate_to_datetime", lambda raw: None)
+    sleep, client, server = await _retry_after_run("Tue, 01 Dec 2026 00:00:00 GMT", monkeypatch)
+    try:
+        assert await client.get("/health") == {"ok": True}
+        assert [c.args[0] for c in sleep.await_args_list] == [0.25]
     finally:
         await client.close()
         await server.close()
