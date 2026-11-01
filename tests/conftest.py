@@ -4,11 +4,13 @@ from unittest.mock import patch
 
 import pytest
 
-from src.services.environment import Environment, OPTIONAL_VARS, REQUIRED_VARS
+from src.services.environment import Config, Environment, OPTIONAL_VARS, REQUIRED_VARS
 from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreClient
 from src.services.streaks import StreakStore
 from src.services.tag_sync import TagSyncService
+from tests.integration_harness import (GUILD, ROLE, Clock, CommandBot, FakeStore, TagBot,
+                                       streaks_module)
 
 
 def pytest_sessionstart(session):
@@ -28,3 +30,78 @@ def isolated_state(monkeypatch):
     for service in (GuildConfig, StoreClient, StreakStore, TagSyncService):
         monkeypatch.setattr(service, "_instance", None)
     monkeypatch.setattr(Environment, "_config", None)
+
+
+# --------------------------------------------------------------------------- #
+# Integration fixtures. The fakes and harnesses they build are in
+# tests/integration_harness.py, which explains what they are for.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Freeze the clock StreakStore stamps marks with, so durations are exact."""
+    ticking = Clock()
+    monkeypatch.setattr(streaks_module.time, "time", ticking)
+    return ticking
+
+
+@pytest.fixture
+def test_config(isolated_state):
+    """Config with no inter-request sync delay, so full syncs run at test speed."""
+    config = Config(discord_token="x" * 60, environment="test", sync_on_start=False,
+                    sync_delay_ms=0, members_intent=True)
+    Environment._config = config
+    return config
+
+
+@pytest.fixture
+def store():
+    return FakeStore()
+
+
+@pytest.fixture
+def bot(store, test_config):
+    """Gateway-driven bot in a guild that already rewards a role."""
+    store.seed_guild(GUILD, ROLE)
+    return TagBot(store)
+
+
+@pytest.fixture
+def fresh_bot(store, test_config):
+    """Gateway-driven bot in a guild nobody has run /setup in yet."""
+    return TagBot(store)
+
+
+@pytest.fixture
+async def ui(store, test_config):
+    """Command-driven bot in a guild that already rewards a role."""
+    store.seed_guild(GUILD, ROLE)
+    harness = CommandBot(store, test_config)
+    yield harness
+    await harness.close()
+
+
+@pytest.fixture
+async def fresh_ui(store, test_config):
+    """Command-driven bot in a guild nobody has run /setup in yet."""
+    harness = CommandBot(store, test_config)
+    yield harness
+    await harness.close()
+
+
+@pytest.fixture
+async def limited_ui(store, test_config):
+    """Command-driven bot running without the Server Members intent."""
+    store.seed_guild(GUILD, ROLE)
+    harness = CommandBot(store, test_config, members=False)
+    yield harness
+    await harness.close()
+
+
+@pytest.fixture
+async def fresh_ui_limited(store, test_config):
+    """Limited mode in a guild nobody has run /setup in yet."""
+    harness = CommandBot(store, test_config, members=False)
+    yield harness
+    await harness.close()
