@@ -18,9 +18,10 @@ class PingCommand(Command):
     def register(self, tree: app_commands.CommandTree) -> None:
         @tree.command(name="ping", description="Check if the bot is responding")
         async def ping(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
-                return
-            await self.execute(interaction)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self.execute(interaction)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         api_latency = round(interaction.client.latency * 1000)
