@@ -22,7 +22,13 @@ def interaction():
     return SimpleNamespace(
         guild_id=1, guild=SimpleNamespace(id=1, me=SimpleNamespace(
             top_role=10, guild_permissions=SimpleNamespace(manage_roles=True),
-        )), user=SimpleNamespace(id=42), command=SimpleNamespace(name="sync"),
+        )),
+        # An authorised invoker, ranked above every role these tests build so
+        # the bot's own hierarchy check stays the one under test.
+        user=SimpleNamespace(id=42, top_role=100, guild_permissions=SimpleNamespace(
+            manage_guild=True, manage_roles=True, administrator=False,
+        )),
+        command=SimpleNamespace(name="sync"),
         response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock(),
                                  edit_message=AsyncMock(), is_done=lambda: False),
         followup=SimpleNamespace(send=AsyncMock()),
@@ -80,9 +86,10 @@ async def test_guard_allows_configured_developer(interaction, monkeypatch):
 
 
 class Role:
-    def __init__(self, *, default=False, managed=False, position=1):
+    def __init__(self, *, default=False, managed=False, position=1, administrator=False):
         self.id, self.mention = 10, "<@&10>"
         self.default, self.managed, self.position = default, managed, position
+        self.permissions = SimpleNamespace(administrator=administrator)
 
     def is_default(self):
         return self.default

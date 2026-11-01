@@ -136,9 +136,36 @@ register.py                   # Command registration
 - `/leaderboard [sort]` - Top reppers by current streak, longest streak, or all-time repped
 - `/status` - This server's sync statistics
 - `/sync` - Manual full member sync (requires Manage Server)
-- `/disable` - Stop managing the reward role in this server
+- `/disable` - Stop managing the reward role in this server (requires Manage Server)
 - `/ping` - Basic ping/pong with latency
 - `/help [command]` - Auto-generated help system
+
+### Who can run the admin commands
+
+`/setup`, `/disable` and `/sync` change state, so each requires **Manage Server** or
+**Administrator**, and the bot checks that itself on every run. Discord's
+`default_member_permissions` only sets the default a server can reassign under Server
+Settings, Integrations, Command Permissions, so it is treated as the convenience it is
+rather than as the gate. Anyone else gets a private reply naming what they need.
+
+Choosing the reward role is held to a higher bar than running the command, because the
+bot hands that role out on your behalf and Manage Server grants no role control at all.
+`/setup` mirrors Discord's own rule for assigning a role, so to pick one you need
+**Manage Roles** and the role must sit **below your own highest role**:
+
+- a role carrying **Administrator** is never accepted, since the reward goes to everyone
+  who equips the tag. This one applies to the owner too
+- **Administrator does not lift you over the hierarchy.** Discord allows only the server
+  owner to assign a role above their own, so an Administrator ranked below a privileged
+  role still cannot make it the reward
+- the **server owner** is the one exception to the rank rule
+
+Without this, Manage Server on its own would be enough to name a privileged role as the
+reward, equip the tag and be handed it.
+
+The bot's own role still has to sit above the reward role for it to be granted at all.
+`/setup` checks that before it writes anything, and `/sync` reports it if it changes
+later. The "Sync now" button `/setup` offers is bound to the admin who ran it.
 
 ## Environment Variables
 

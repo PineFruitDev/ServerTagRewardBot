@@ -36,6 +36,51 @@ def bot_permissions(interaction: discord.Interaction) -> discord.Permissions | N
     return granted if isinstance(granted, discord.Permissions) else None
 
 
+def user_permissions(interaction: discord.Interaction) -> discord.Permissions | None:
+    """The invoking member's guild-wide permissions, or None if unknowable.
+
+    Member.guild_permissions resolves Discord's implications already: the guild
+    owner and anyone holding Administrator come back with every permission set,
+    so a check for one named permission accepts both of those too.
+
+    It is NOT an answer about rank. Administrator grants every permission but
+    lifts nobody over the role hierarchy; only the guild owner is above it. A
+    caller that cares which roles the invoker may hand out has to compare
+    top_role itself, and test owner_id for the exemption.
+
+    None means refuse: either this is not a guild, or the interaction carried
+    no member object. Interaction.permissions is deliberately not used as a
+    fallback, because discord.py only ever populates it from that same member
+    object, and it is channel-scoped rather than guild-wide.
+    """
+    if interaction.guild is None:
+        return None
+    return getattr(interaction.user, "guild_permissions", None)
+
+
+#: Discord's own labels for the permissions a denial can name. Members know
+#: "Manage Server" from the UI, not the manage_guild the API calls it.
+PERMISSION_LABELS = {
+    "administrator": "Administrator",
+    "manage_guild": "Manage Server",
+    "manage_roles": "Manage Roles",
+}
+
+
+def permission_label(name: str) -> str:
+    return PERMISSION_LABELS.get(name, name.replace("_", " ").title())
+
+
+def invoked_name(interaction: discord.Interaction, default: str) -> str:
+    """The slash name actually used, so a denial names the right command.
+
+    One Command object can register several slash commands (/setup registers
+    /disable too), in which case help_info.name is only the first of them.
+    """
+    command = getattr(interaction, "command", None)
+    return getattr(command, "name", None) or default
+
+
 @dataclass
 class CommandHelpInfo:
     """Help information for the auto-generated help system."""
@@ -54,6 +99,15 @@ class Command(ABC):
 
     #: Permissions the BOT needs for this command (guild_permissions attribute names)
     required_permissions: tuple[str, ...] = ()
+
+    #: Permissions the INVOKER needs, any one of which is enough.
+    #: app_commands.default_permissions only sets the *default* a guild can
+    #: reassign at will (Server Settings, Integrations, Command Permissions),
+    #: so it cannot be the only gate on a command that changes state. Anything
+    #: that writes config or moves roles in bulk re-checks here, where the
+    #: guild cannot turn it off. This gates who may *run* a command; a command
+    #: handing out a role has to check rank separately (see setup.py).
+    required_user_permissions: tuple[str, ...] = ()
 
     #: Whether this command can only be used in guilds (not DMs)
     guild_only: bool = False
@@ -77,6 +131,26 @@ class Command(ABC):
         """Check whether the command can run in the current context."""
         if self.guild_only and interaction.guild is None:
             return False, "This command can only be used in servers."
+
+        # Authorisation before capability. Someone who may not run the command
+        # at all should be told that, not handed a report on the bot's own
+        # permission problems.
+        # Not conditioned on being in a guild: guild permissions mean nothing
+        # in a DM, so a command asking for them has nothing to check against
+        # and must refuse. guild_only would catch today's three commands
+        # first, but a future one that forgot it would otherwise be ungated.
+        if self.required_user_permissions:
+            if interaction.guild is None:
+                return False, "This command can only be used in servers."
+            held = user_permissions(interaction)
+            if held is None:
+                return False, ("I can't read your permissions in this server yet. "
+                               "Give me a moment and try again.")
+            if not any(getattr(held, perm, False) for perm in self.required_user_permissions):
+                needed = " or ".join(permission_label(p) for p in self.required_user_permissions)
+                name = invoked_name(interaction, self.name)
+                return False, (f"You need **{needed}** to use /{name}. "
+                               "Ask someone who manages this server to run it for you.")
 
         if self.required_permissions and interaction.guild is not None:
             granted = bot_permissions(interaction)

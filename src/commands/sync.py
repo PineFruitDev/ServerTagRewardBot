@@ -18,6 +18,7 @@ class SyncCommand(Command):
     )
 
     required_permissions = ("manage_roles",)
+    required_user_permissions = ("manage_guild", "administrator")
     guild_only = True
 
     def register(self, tree: app_commands.CommandTree) -> None:
