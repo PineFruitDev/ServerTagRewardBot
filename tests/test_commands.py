@@ -26,7 +26,7 @@ def interaction():
         # An authorised invoker, ranked above every role these tests build so
         # the bot's own hierarchy check stays the one under test.
         user=SimpleNamespace(id=42, top_role=100, guild_permissions=SimpleNamespace(
-            manage_guild=True, administrator=False,
+            manage_guild=True, manage_roles=True, administrator=False,
         )),
         command=SimpleNamespace(name="sync"),
         response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock(),

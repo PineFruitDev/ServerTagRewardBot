@@ -464,17 +464,23 @@ class FakeRole:
     def mention(self) -> str:
         return f"<@&{self.id}>"
 
-    def __le__(self, other) -> bool:
-        return self.position <= other.position
+    # discord.Role orders on position but breaks a tie on id, where the LOWER
+    # id (the older role) ranks higher. A fake that compared position alone
+    # would let an equal-rank bug through, so these mirror role.py exactly.
 
     def __lt__(self, other) -> bool:
+        if self.position == other.position:
+            return self.id > other.id
         return self.position < other.position
 
-    def __ge__(self, other) -> bool:
-        return self.position >= other.position
+    def __le__(self, other) -> bool:
+        return not FakeRole.__lt__(other, self)
 
     def __gt__(self, other) -> bool:
-        return self.position > other.position
+        return FakeRole.__lt__(other, self)
+
+    def __ge__(self, other) -> bool:
+        return not FakeRole.__lt__(self, other)
 
 
 class FakeMember:
@@ -484,14 +490,22 @@ class FakeMember:
         self.bot = bot
         self.display_name = name
         # Permissions.none() is falsy, so these have to be compared against None
-        self.guild_permissions = discord.Permissions(manage_roles=True) if permissions is None else permissions
+        held = discord.Permissions(manage_roles=True) if permissions is None else permissions
+        # Member.guild_permissions returns *every* permission for an
+        # Administrator holder, so a fake that stored the raw set would let a
+        # test pass on a set production never sees. It does the same for the
+        # guild owner, which FakeGuild.owner_id decides rather than this.
+        self.guild_permissions = discord.Permissions.all() if held.administrator else held
         self.top_role = FakeRole("800000000000000009", position=50, name="Bot") if top_role is None else top_role
         self.display_avatar = SimpleNamespace(url="https://cdn.example/avatar.png")
 
 
 class FakeGuild:
-    def __init__(self, guild_id: str = GUILD, me=_UNSET):
+    def __init__(self, guild_id: str = GUILD, me=_UNSET, owner_id: str | None = None):
         self.id = int(guild_id)
+        # Nobody in these tests owns the guild unless a test says so. The owner
+        # is the only member Discord lifts over the role hierarchy.
+        self.owner_id = int(owner_id) if owner_id is not None else int(user_id(999))
         # Guild.me is None whenever the self member was never cached, which is
         # the normal case in limited mode. Pass me=None to reproduce that.
         self.me = FakeMember(user_id(99), name="TagBot") if me is _UNSET else me
@@ -504,11 +518,13 @@ class FakeInteraction:
                  app_permissions: discord.Permissions | None = None, dm: bool = False):
         self.guild = None if dm else (FakeGuild() if guild is _UNSET else guild)
         self.guild_id = None if self.guild is None else self.guild.id
-        # The default invoker is an admin holding Manage Server, which is what
-        # the state-changing commands gate on; guild.me separately holds the
-        # Manage Roles the bot itself needs. Pass a user to vary either.
+        # The default invoker is an admin who clears every gate: Manage Server
+        # to run the state-changing commands, and Manage Roles to be allowed to
+        # hand a role out. guild.me separately holds the Manage Roles the bot
+        # itself needs. Pass a user to vary either.
         self.user = user if user is not None else FakeMember(
-            user_id(1), name="Admin", permissions=discord.Permissions(manage_guild=True))
+            user_id(1), name="Admin",
+            permissions=discord.Permissions(manage_guild=True, manage_roles=True))
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.command = SimpleNamespace(name="test")

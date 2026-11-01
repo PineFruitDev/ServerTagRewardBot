@@ -70,7 +70,7 @@ def interaction():
         )),
         # An authorised invoker, ranked above every role these tests build.
         user=SimpleNamespace(id=42, top_role=100, guild_permissions=SimpleNamespace(
-            manage_guild=True, administrator=False,
+            manage_guild=True, manage_roles=True, administrator=False,
         )),
         response=SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock(),
                                  edit_message=AsyncMock(), is_done=lambda: False),
@@ -178,7 +178,7 @@ async def test_setup_execute_points_at_the_role_argument(interaction):
 
 @pytest.fixture
 def view():
-    v = SyncPromptView("1")
+    v = SyncPromptView("1", 42)  # 42 is the invoker fixture's id
     yield v
     v.stop()
 

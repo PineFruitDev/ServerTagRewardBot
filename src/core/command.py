@@ -39,22 +39,23 @@ def bot_permissions(interaction: discord.Interaction) -> discord.Permissions | N
 def user_permissions(interaction: discord.Interaction) -> discord.Permissions | None:
     """The invoking member's guild-wide permissions, or None if unknowable.
 
-    Member.guild_permissions resolves Discord's two implications already: the
-    guild owner and anyone holding Administrator come back with every
-    permission set. So a check for one named permission accepts both of those
-    too, and no separate owner test is needed anywhere.
+    Member.guild_permissions resolves Discord's implications already: the guild
+    owner and anyone holding Administrator come back with every permission set,
+    so a check for one named permission accepts both of those too.
 
-    interaction.user is a plain User rather than a Member when no member object
-    was sent, and a User carries no permissions at all. Discord resolves the
-    invoker's permissions into every guild interaction, so fall back to those.
+    It is NOT an answer about rank. Administrator grants every permission but
+    lifts nobody over the role hierarchy; only the guild owner is above it. A
+    caller that cares which roles the invoker may hand out has to compare
+    top_role itself, and test owner_id for the exemption.
+
+    None means refuse: either this is not a guild, or the interaction carried
+    no member object. Interaction.permissions is deliberately not used as a
+    fallback, because discord.py only ever populates it from that same member
+    object, and it is channel-scoped rather than guild-wide.
     """
     if interaction.guild is None:
         return None
-    granted = getattr(interaction.user, "guild_permissions", None)
-    if granted is not None:
-        return granted
-    resolved = getattr(interaction, "permissions", None)
-    return resolved if isinstance(resolved, discord.Permissions) else None
+    return getattr(interaction.user, "guild_permissions", None)
 
 
 #: Discord's own labels for the permissions a denial can name. Members know
@@ -104,7 +105,8 @@ class Command(ABC):
     #: reassign at will (Server Settings, Integrations, Command Permissions),
     #: so it cannot be the only gate on a command that changes state. Anything
     #: that writes config or moves roles in bulk re-checks here, where the
-    #: guild cannot turn it off.
+    #: guild cannot turn it off. This gates who may *run* a command; a command
+    #: handing out a role has to check rank separately (see setup.py).
     required_user_permissions: tuple[str, ...] = ()
 
     #: Whether this command can only be used in guilds (not DMs)

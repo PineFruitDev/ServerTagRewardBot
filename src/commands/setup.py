@@ -9,12 +9,76 @@ from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 from src.services.tasks import spawn
 
 
+def handout_refusal(interaction: discord.Interaction, role: discord.Role) -> str | None:
+    """Why this invoker may not make `role` the reward, or None when they may.
+
+    Mirrors Discord's own rule for handing out a role: you need Manage Roles,
+    and the role has to sit below your own highest one. Manage Server, which
+    is what /setup gates on, confers no role control at all, so without this
+    a member holding only Manage Server could name any role beneath the bot
+    as the reward, equip the tag and collect it.
+
+    Only the guild owner is exempt from the rank half. Administrator grants
+    every permission but does not lift you over the hierarchy, so a non-owner
+    Administrator still cannot hand out a role above their own; exempting them
+    here would reopen the climb from one rung higher up.
+
+    Refuses when it cannot tell, rather than falling through to the write.
+    """
+    guild = interaction.guild
+    if guild is None:
+        return "I can't tell which server this is. Run /setup again from the server itself."
+
+    # The reward lands on everyone wearing the tag, so Administrator would make
+    # equipping a tag a route to taking the server over. Checked before the
+    # owner exemption: nobody opts into this, the owner included.
+    if role.permissions.administrator:
+        return (f"{role.mention} has the **Administrator** permission, so I won't hand it out "
+                "automatically to everyone repping the tag. Pick a role without it.")
+
+    if getattr(guild, "owner_id", None) == interaction.user.id:
+        return None  # the owner sits above every role by definition
+
+    held = user_permissions(interaction)
+    author_top = getattr(interaction.user, "top_role", None)
+    if held is None or author_top is None:
+        return ("I can't read your roles in this server yet. "
+                "Give me a moment and run /setup again.")
+
+    if not getattr(held, "manage_roles", False):
+        return ("You need **Manage Roles** as well as Manage Server to pick the reward, "
+                "because I hand that role out on your behalf. Ask an admin to run /setup.")
+
+    if author_top <= role:
+        return (f"{role.mention} is not below your own highest role, so you can't make it the "
+                "reward. Pick a role beneath yours, or ask an admin ranked above it.")
+
+    return None
+
+
 class SyncPromptView(discord.ui.View):
     """Final step of setup: offer to run the first sync right away."""
 
-    def __init__(self, guild_id: str):
+    def __init__(self, guild_id: str, author_id: int):
         super().__init__(timeout=300)
         self.guild_id = guild_id
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only the admin who ran /setup may press these.
+
+        "Sync now" starts the same full member walk /sync gates on Manage
+        Server, so it cannot be the one path in with no check of its own. The
+        reply is ephemeral, which in practice means nobody else is shown the
+        buttons, but that is a keyword in another function and this does not
+        depend on it.
+        """
+        if interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message(
+            "❌ Only the admin who ran /setup can use these buttons.", ephemeral=True
+        )
+        return False
 
     async def _finish(self, interaction: discord.Interaction, message: str) -> None:
         for child in self.children:
@@ -87,32 +151,9 @@ class SetupCommand(Command):
             )
             return
 
-        # The reward is handed out automatically to everyone wearing the tag,
-        # so an Administrator reward role turns equipping a tag into taking
-        # over the server. Nobody gets to opt into that, the owner included.
-        if role.permissions.administrator:
-            await interaction.response.send_message(
-                f"❌ {role.mention} has the **Administrator** permission, so I won't hand it out "
-                "automatically to everyone repping the tag. Pick a role without it.",
-                ephemeral=True,
-            )
-            return
-
-        # Manage Server does not confer Manage Roles, so without this check a
-        # member holding only Manage Server could name any role below mine as
-        # the reward, equip the tag and collect it. Mirror Discord's own rule
-        # instead: you cannot hand out a role you could not assign yourself.
-        # guild_permissions is all-True for the owner and for Administrator
-        # holders, so both of those skip this.
-        held = user_permissions(interaction)
-        author_top = getattr(interaction.user, "top_role", None)
-        if (held is not None and not getattr(held, "administrator", False)
-                and author_top is not None and author_top <= role):
-            await interaction.response.send_message(
-                f"❌ {role.mention} is not below your own highest role, so you can't make it the "
-                "reward. Pick a role beneath yours, or ask an admin whose role sits above it.",
-                ephemeral=True,
-            )
+        refusal = handout_refusal(interaction, role)
+        if refusal is not None:
+            await interaction.response.send_message(f"❌ {refusal}", ephemeral=True)
             return
 
         # Guild.me is annotated as Member but is really get_member(self), which
@@ -138,6 +179,6 @@ class SetupCommand(Command):
             f"✅ Set up! Members repping this server's tag now receive {role.mention}.\n\n"
             "**Would you like to sync your server tag rewards now?** "
             "This checks every current member once so existing tag-wearers get the role immediately.",
-            view=SyncPromptView(str(guild.id)),
+            view=SyncPromptView(str(guild.id), interaction.user.id),
             ephemeral=True,
         )

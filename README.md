@@ -148,18 +148,24 @@ register.py                   # Command registration
 Settings, Integrations, Command Permissions, so it is treated as the convenience it is
 rather than as the gate. Anyone else gets a private reply naming what they need.
 
-Two further checks protect the reward role, because Manage Server does not grant Manage
-Roles:
+Choosing the reward role is held to a higher bar than running the command, because the
+bot hands that role out on your behalf and Manage Server grants no role control at all.
+`/setup` mirrors Discord's own rule for assigning a role, so to pick one you need
+**Manage Roles** and the role must sit **below your own highest role**:
 
-- a role carrying **Administrator** is never accepted as the reward, since the reward is
-  handed to everyone who equips the tag
-- the reward must sit **below your own highest role**, mirroring Discord's own rule that
-  you cannot hand out a role you could not assign yourself (Administrators and the owner
-  are exempt, as Discord treats them as holding every permission)
+- a role carrying **Administrator** is never accepted, since the reward goes to everyone
+  who equips the tag. This one applies to the owner too
+- **Administrator does not lift you over the hierarchy.** Discord allows only the server
+  owner to assign a role above their own, so an Administrator ranked below a privileged
+  role still cannot make it the reward
+- the **server owner** is the one exception to the rank rule
+
+Without this, Manage Server on its own would be enough to name a privileged role as the
+reward, equip the tag and be handed it.
 
 The bot's own role still has to sit above the reward role for it to be granted at all.
 `/setup` checks that before it writes anything, and `/sync` reports it if it changes
-later.
+later. The "Sync now" button `/setup` offers is bound to the admin who ran it.
 
 ## Environment Variables
 
