@@ -119,6 +119,68 @@ or URL reaches either the reply or the log: `JsonFormatter` reduces exception
 arguments to their type name, so an unexpected error is logged with its type
 and the file and line that raised it instead.
 
+### What the logs look like
+
+Every line is one JSON object on stdout, so a host's log collector can index
+it without a parser. Four keys are always present (`timestamp`, `level`,
+`logger`, `message`) and a line handling an interaction carries five more:
+
+```json
+{"timestamp": "2026-11-01T12:00:00.123456+00:00", "level": "WARNING",
+ "logger": "StoreClient", "message": "request - GET /guilds/900 failed (HTTP 503), retry 1/3 in 0.42s (backoff)",
+ "correlation_id": "1a2c4e6f8b0d2", "command": "status", "guild": "900000000000000001", "user": "700000000000000001"}
+{"timestamp": "2026-11-01T12:00:00.567890+00:00", "level": "INFO",
+ "logger": "Commands", "message": "observed - /status finished",
+ "correlation_id": "1a2c4e6f8b0d2", "command": "status", "guild": "900000000000000001", "user": "700000000000000001",
+ "outcome": "ok", "latency_ms": 444}
+```
+
+`correlation_id` is derived from Discord's own interaction id, so every line a
+single command produces shares one value: the command's, the store client's
+retries, and the failure path's, which recomputes the id rather than relying
+on state the command has already torn down. Background work a command starts
+inherits it too, so a sync that `/setup` kicked off is findable from the
+`/setup` that kicked it off.
+
+Every invocation closes with exactly one `outcome` line (`ok`, `denied`,
+`error` or `cancelled`), which makes counting failures a filter on one field
+rather than a search through prose. Most carry `latency_ms` as well; the
+exception is a failure that never reached the command at all, which is what an
+unresolvable option or a stale registration produces. Those are still closed
+out as `error`, because a failure count that quietly omitted exactly the
+failures a bad deploy causes would be worse than useless, but they carry no
+latency, since nothing started a clock and a zero would read as a command that
+ran instantly.
+
+`user` is who asked, not who was affected. A command's own lines carry the
+invoker's id; the background sync a command spawns drops the field entirely at
+the `src/services/tasks.py` boundary, because a full sync walks every member
+of a guild and attributing thousands of "granted the role" lines to the one
+admin who pressed the button would make a filter on that field answer the
+wrong question.
+
+Nothing else is allowed into a line. `src/services/logger.py` keeps an
+allowlist of field names and drops everything else, because serializing
+whatever a caller attached is how a request header or a response body ends up
+in a log file. Field values are redacted exactly like messages are: the values
+of credential-named environment variables are replaced wherever they appear,
+as are URLs (which can carry signed query strings) and anything written as
+`token=`, `Authorization: Bearer` and so on.
+
+Two independent rules keep credentials out. `JsonFormatter` reduces an
+exception argument to its type name, so a store error quoting the header it
+was rejected for never reaches a message in the first place; redaction at the
+output boundary then catches anything a call site formats in as a string, so a
+careless `log.info` cannot leak one either. `tests/test_log_redaction.py`
+drives every command, the failure path, the store client's retries, startup
+validation and discord.py's own rate-limit warnings with both credentials set,
+and fails if any ten consecutive characters of either survives into the
+output. Ten rather than the whole value, so that a masked prefix fails too.
+
+Ids in the fields are Discord snowflakes, which are public. Display names are
+deliberately never logged: they identify a person far more than an id does,
+and they are user-controlled text going into a system that reads logs.
+
 ## Project Structure
 
 ```
@@ -142,6 +204,7 @@ src/
     ├── guild_config.py       # Per-server reward roles (tagbot-store)
     ├── streaks.py            # Streak tracking (tagbot-store)
     ├── logger.py             # Structured JSON logging with credential redaction
+    ├── observability.py      # Per-command correlation id, outcome, and latency
     ├── command_errors.py     # ← One failure path for every command and button
     ├── discord_errors.py     # Classifies Discord API failures (fixable vs transient)
     ├── lifecycle.py          # Graceful shutdown on SIGINT/SIGTERM
@@ -228,12 +291,19 @@ npm --prefix worker test
 The Python suite covers tag detection, role reconciliation, pagination and sync
 failures, slash command wiring and guards, the post-setup sync prompt, command
 and button failure reporting (including what the reply and the log leave out),
-configuration, storage retries and caching, streak math, both entry points
-(startup order, the process exit codes, and command registration), and the
-one-time SQLite-to-D1 migration. Discord calls are mocked; HTTP client tests
-use a loopback server. Pytest blocks non-loopback connections, ignores `.env`, and
-isolates configuration and service singletons between tests. No Discord or
-Cloudflare credentials are needed.
+per-command correlation and outcome reporting, credential redaction across
+every surface that writes a log line, configuration, storage retries and
+caching, streak math, both entry points (startup order, the process exit
+codes, and command registration), and the one-time SQLite-to-D1 migration.
+Discord calls are mocked; HTTP client tests use a loopback server. Pytest
+blocks non-loopback connections, ignores `.env`, and isolates configuration
+and service singletons between tests. No Discord or Cloudflare credentials are
+needed, and the redaction tests use synthetic stand-ins shaped like the real
+ones.
+
+The log assertions swap the stream on the handlers the bot installed at import
+time rather than adding a handler of their own, so what a test reads is what
+would have reached stdout, through the formatter the bot really configured.
 
 `mypy.ini` holds the typecheck scope. It checks every production module with no
 per-module error suppressions, so every error code is enforced everywhere. Where

@@ -39,9 +39,10 @@ class LeaderboardCommand(Command):
         ])
         async def leaderboard(interaction: discord.Interaction,
                               sort: app_commands.Choice[str] | None = None) -> None:
-            if not await self.guard(interaction):
-                return
-            await self._show(interaction, sort.value if sort else "current")
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self._show(interaction, sort.value if sort else "current")
 
     async def execute(self, interaction: discord.Interaction) -> None:
         await self._show(interaction, "current")

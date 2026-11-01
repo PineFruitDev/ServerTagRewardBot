@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -6,16 +7,26 @@ from types import MappingProxyType
 
 import pytest
 
-from src.services.logger import JsonFormatter, configure_library_logging, get_logger
+from src.services.logger import (FIELDS, RESERVED, JsonFormatter, attach, bound,
+                                 configure_library_logging, context, get_logger,
+                                 without_user)
 
 
-@pytest.mark.parametrize("context", ["Bot", "ScheduledJob", "StoreClient"])
-def test_json_failure_redacts_credentials(monkeypatch, context):
+def record(message: str = "ran", level: int = logging.INFO, **fields) -> logging.LogRecord:
+    """A record carrying structured fields, the way `extra=` would set them."""
+    built = logging.LogRecord("test", level, "", 0, message, (), None)
+    for name, value in fields.items():
+        setattr(built, name, value)
+    return built
+
+
+@pytest.mark.parametrize("logger_name", ["Bot", "ScheduledJob", "StoreClient"])
+def test_json_failure_redacts_credentials(monkeypatch, logger_name):
     monkeypatch.setenv("STORE_TOKEN", "synthetic-sensitive-value")
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
     handler.setFormatter(JsonFormatter())
-    logger = logging.Logger(context)
+    logger = logging.Logger(logger_name)
     logger.addHandler(handler)
     try:
         raise RuntimeError("private exception payload")
@@ -28,7 +39,7 @@ def test_json_failure_redacts_credentials(monkeypatch, context):
     raw = stream.getvalue()
     assert len(raw.splitlines()) == 1
     entry = json.loads(raw)
-    assert entry["logger"] == context
+    assert entry["logger"] == logger_name
     assert entry["level"] == "ERROR"
     assert entry["exception_type"] == "RuntimeError"
     for secret in ["synthetic-sensitive-value", "hunter-test", "signature", "private"]:
@@ -127,6 +138,145 @@ def test_a_message_with_no_arguments_formats_cleanly():
 
     assert entry["message"] == "Shutdown complete"
     assert entry["level"] == "INFO"
+# --- structured fields ------------------------------------------------------
+
+def test_an_unlisted_extra_is_never_serialized():
+    """The allowlist is the defence; `extra=` is how a response body gets in."""
+    entry = json.loads(JsonFormatter().format(
+        record("saved", command="setup", response_body="private-response-body")))
+    assert entry["command"] == "setup"
+    assert "response_body" not in entry
+    assert "private-response-body" not in json.dumps(entry)
+
+
+def test_no_field_can_shadow_a_key_the_formatter_writes():
+    """A field named "message" would overwrite the line it was meant to annotate."""
+    assert not set(FIELDS) & set(RESERVED)
+
+
+def test_a_field_value_is_redacted_like_a_message(monkeypatch):
+    """A field is not a trusted channel: the same redaction runs over it."""
+    monkeypatch.setenv("DISCORD_TOKEN", "synthetic-token-in-a-field")
+    output = JsonFormatter().format(record("ran", command="help synthetic-token-in-a-field"))
+    assert "synthetic-token-in-a-field" not in output
+    assert "[REDACTED]" in json.loads(output)["command"]
+
+
+@pytest.mark.parametrize("latency", [42, 12.5])
+def test_a_latency_stays_a_number(latency):
+    """Stringifying it would make every downstream aggregation parse it back."""
+    assert json.loads(JsonFormatter().format(record(latency_ms=latency)))["latency_ms"] == latency
+
+
+def test_a_field_value_that_is_neither_text_nor_a_number_is_stringified():
+    """json.dumps must not be the step that fails and costs the whole line."""
+    class Snowflake:
+        def __str__(self) -> str:
+            return "900000000000000001"
+
+    assert json.loads(JsonFormatter().format(
+        record(guild=Snowflake())))["guild"] == "900000000000000001"
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_number_json_cannot_represent_is_quoted_rather_than_emitted_bare(value):
+    """json.dumps writes NaN and Infinity bare, and neither is valid JSON.
+
+    One such value would make the whole line unparseable for every reader
+    downstream, which is a worse outcome than an ugly string.
+    """
+    entry = json.loads(JsonFormatter().format(record(latency_ms=value)))
+    assert isinstance(entry["latency_ms"], str)
+
+
+def test_a_boolean_is_not_treated_as_a_measurement():
+    """bool is an int in Python, but `"outcome": true` is not a reading of anything."""
+    assert json.loads(JsonFormatter().format(record(outcome=True)))["outcome"] == "True"
+
+
+# --- dropping the user for detached work ------------------------------------
+
+def test_without_user_keeps_everything_except_the_user():
+    with bound(correlation_id="abc123", command="setup", guild="900", user="700"):
+        with without_user():
+            held = dict(context())
+        assert dict(context())["user"] == "700"
+    assert held == {"correlation_id": "abc123", "command": "setup", "guild": "900"}
+
+
+def test_without_user_is_harmless_when_no_user_is_bound():
+    with bound(correlation_id="abc123"), without_user():
+        assert dict(context()) == {"correlation_id": "abc123"}
+
+
+def test_a_field_left_unset_is_absent_rather_than_null():
+    """A null for every field the line does not have is noise in every line."""
+    entry = json.loads(JsonFormatter().format(record(command="ping")))
+    assert set(entry) == {"timestamp", "level", "logger", "message", "command"}
+
+
+# --- ambient context --------------------------------------------------------
+
+def test_bound_fields_land_on_a_line_that_knows_nothing_about_them():
+    """The point of binding: StoreClient logs a retry and it is still correlated."""
+    with bound(correlation_id="abc123", command="sync", guild="900", user="700"):
+        entry = json.loads(JsonFormatter().format(record("retry 1/3")))
+    assert entry["correlation_id"] == "abc123"
+    assert (entry["command"], entry["guild"], entry["user"]) == ("sync", "900", "700")
+
+
+def test_an_inner_scope_adds_to_the_outer_one_instead_of_replacing_it():
+    with bound(correlation_id="abc123", guild="900"):
+        with bound(command="disable"):
+            entry = json.loads(JsonFormatter().format(record()))
+    assert entry["correlation_id"] == "abc123"
+    assert entry["command"] == "disable"
+
+
+def test_a_field_offered_as_none_does_not_erase_what_is_already_bound():
+    """A caller that knows only some of the fields must not clear the rest."""
+    with bound(correlation_id="abc123", command="setup"):
+        with bound(command=None):
+            assert dict(context()) == {"correlation_id": "abc123", "command": "setup"}
+
+
+def test_a_record_extra_wins_over_the_same_field_in_the_context():
+    with bound(command="sync"):
+        entry = json.loads(JsonFormatter().format(record(command="disable")))
+    assert entry["command"] == "disable"
+
+
+def test_the_context_is_gone_after_the_block():
+    with bound(correlation_id="abc123"):
+        pass
+    assert dict(context()) == {}
+
+
+def test_the_context_survives_an_exception_inside_the_block():
+    with pytest.raises(RuntimeError), bound(correlation_id="abc123"):
+        raise RuntimeError("boom")
+    assert dict(context()) == {}
+
+
+async def test_an_attached_field_cannot_outlive_the_task_that_set_it():
+    """What makes attach() safe on a surface with no block to close."""
+    async def press() -> dict:
+        attach(correlation_id="abc123", command="setup")
+        return dict(context())
+
+    assert (await asyncio.create_task(press()))["correlation_id"] == "abc123"
+    assert dict(context()) == {}
+
+
+async def test_a_bound_field_is_inherited_by_work_spawned_inside_the_block():
+    """A sync a command kicked off is findable by that command's own id."""
+    async def background() -> dict:
+        await asyncio.sleep(0)
+        return dict(context())
+
+    with bound(correlation_id="abc123", command="setup"):
+        task = asyncio.create_task(background())
+    assert (await task)["correlation_id"] == "abc123"
 
 
 @pytest.fixture

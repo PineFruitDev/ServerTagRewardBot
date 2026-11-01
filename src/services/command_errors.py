@@ -30,6 +30,7 @@ from discord import app_commands
 
 from src.services.discord_errors import describe, user_message
 from src.services.logger import get_logger
+from src.services.observability import correlated, record_untimed_failure
 from src.services.store_client import StoreError, StoreUnavailable
 
 log = get_logger("CommandErrors")
@@ -172,12 +173,24 @@ async def report(interaction: discord.Interaction, error: Exception, *, subject:
     The log comes first and unconditionally. Replying needs the network and an
     interaction token that may already have expired, and a failure there must
     not cost the only record of what went wrong.
+
+    The correlation fields are re-derived from the interaction rather than
+    inherited. The tree calls on_error after the command's own observed() block
+    has already exited, so there is no ambient context left to inherit by then;
+    because the id is derived from the interaction itself, the one recomputed
+    here is the one already on the command's own lines.
     """
     original = unwrap(error)
     failure = classify(original)
-    log.log(failure.level, "report - %s %s%s: %s", subject, failure.cause,
-            origin(original) if failure.unexpected else "", original)
-    if not await tell(interaction, failure.message):
-        # Worth its own line: an operator otherwise cannot tell a failure that
-        # was handled from one the user never heard about.
-        log.warning("report - %s failed and could not be reported to the user", subject)
+    command = getattr(interaction.command, "name", None)
+    with correlated(interaction, command):
+        log.log(failure.level, "report - %s %s%s: %s", subject, failure.cause,
+                origin(original) if failure.unexpected else "", original)
+        # A bad option or a stale registration raises before the command body
+        # exists, and a button press has no body to wrap, so for those this is
+        # the only place that can close the access log.
+        record_untimed_failure(interaction)
+        if not await tell(interaction, failure.message):
+            # Worth its own line: an operator otherwise cannot tell a failure
+            # that was handled from one the user never heard about.
+            log.warning("report - %s failed and could not be reported to the user", subject)

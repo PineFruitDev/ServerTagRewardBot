@@ -62,22 +62,27 @@ class SetupCommand(Command):
         @app_commands.describe(role="The role to grant while the server tag is equipped")
         @app_commands.default_permissions(manage_guild=True)
         async def setup(interaction: discord.Interaction, role: discord.Role) -> None:
-            if not await self.guard(interaction):
-                return
-            await self._configure(interaction, role)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self._configure(interaction, role)
 
         @tree.command(name="disable", description="Stop managing the tag reward role in this server")
         @app_commands.default_permissions(manage_guild=True)
         async def disable(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
-                return
-            was_configured = await GuildConfig.get_instance().disable(str(interaction.guild_id))
-            message = (
-                "🛑 Tag rewards disabled for this server. Existing roles are left as they are; run /setup to turn it back on."
-                if was_configured else
-                "ℹ️ This server wasn't configured yet. Run /setup to get started."
-            )
-            await interaction.response.send_message(message, ephemeral=True)
+            # Named explicitly: this callback belongs to SetupCommand, so the
+            # default would log every /disable as a /setup.
+            async with self.observed(interaction, "disable"):
+                if not await self.guard(interaction):
+                    return
+                was_configured = await GuildConfig.get_instance().disable(str(interaction.guild_id))
+                message = (
+                    "🛑 Tag rewards disabled for this server. Existing roles are left as they are; "
+                    "run /setup to turn it back on."
+                    if was_configured else
+                    "ℹ️ This server wasn't configured yet. Run /setup to get started."
+                )
+                await interaction.response.send_message(message, ephemeral=True)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Use /setup role:@Role to configure.", ephemeral=True)

@@ -24,9 +24,10 @@ class SyncCommand(Command):
         @tree.command(name="sync", description="Run a full member sync of the tag reward role")
         @app_commands.default_permissions(manage_guild=True)
         async def sync(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
-                return
-            await self.execute(interaction)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self.execute(interaction)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         guild_id = str(interaction.guild_id)

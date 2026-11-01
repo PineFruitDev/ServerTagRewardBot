@@ -86,19 +86,36 @@ The application writes one JSON object per line to stdout, with `timestamp`
 information is attached. Startup validation can also write a plain-text exit
 message to stderr, so capture both streams.
 
-Use the timestamp to correlate events, the logger to identify the component,
-and the guild ID in the message to follow one server. `TagSyncService` messages report
-role writes, sync start/completion, and aborted member scans. `StoreClient`
-reports retries and exhaustion. `CommandErrors` identifies command/button
-failures and includes a source location for unexpected defects. During normal
-bot startup, `discord` and `aiohttp` warning/error logs use the same JSON handler.
+A line emitted while handling an interaction carries four more fields:
+`correlation_id`, `command`, `guild`, and `user`. Select on `correlation_id` to
+get everything one command did, including the store retries underneath it, the
+failure report, and any background sync it started. Select on `guild` to follow
+one server and on `command` to follow one command across servers. `user` is who
+asked for the work, not who it was done to, and it is absent from the lines a
+background sync writes, because a full sync touches every member rather than
+the one person who triggered it.
 
-The formatter redacts known credential values and URLs and omits arbitrary
-extras and tracebacks. Messages can still contain guild/user identifiers and
-the configured store hostname. Review and minimize excerpts before sharing;
-redaction is not permission to publish logs. Keep the application revision,
-UTC interval, component, HTTP status/Discord code, and affected operation in an
-incident note without copying credentials or full response bodies.
+Every invocation also ends with one line carrying `outcome` (`ok`, `denied`,
+`error`, or `cancelled`) and usually `latency_ms`, from the `Commands` logger.
+Count `outcome` to measure failures rather than grepping messages, and sort on
+`latency_ms` to find the slow guilds. A failure that never reached the command
+(an option Discord could not resolve, a client working from a stale command
+list) is recorded as `error` with no `latency_ms`, because nothing timed it.
+
+Use the logger to identify the component. `TagSyncService` messages report role
+writes, sync start/completion, and aborted member scans. `StoreClient` reports
+retries and exhaustion. `CommandErrors` identifies command/button failures and
+includes a source location for unexpected defects. `Command` reports an
+invocation refused for context or permissions. During normal bot startup,
+`discord` and `aiohttp` warning/error logs use the same JSON handler.
+
+The formatter redacts known credential values and URLs, omits arbitrary extras
+and tracebacks, and drops any field it is not expecting. Messages and fields
+can still contain guild/user identifiers and the configured store hostname.
+Review and minimize excerpts before sharing; redaction is not permission to
+publish logs. Keep the application revision, UTC interval, component, HTTP
+status/Discord code, `correlation_id`, and affected operation in an incident
+note without copying credentials or full response bodies.
 
 ## Shutdown and rollback
 
@@ -120,5 +137,6 @@ do not delete D1 or replay migrations as a substitute for a recovery plan.
 - Sync and Discord failures: `src/services/tag_sync.py`, `discord_errors.py`
 - Store retries: `src/services/store_client.py`
 - Log format/errors: `src/services/logger.py`, `command_errors.py`
+- Correlation, outcome, latency: `src/services/observability.py`
 - Shutdown: `src/services/lifecycle.py`, `tasks.py`
 - Worker commands/schema: `worker/package.json`, `worker/wrangler.toml`, `worker/migrations/`
