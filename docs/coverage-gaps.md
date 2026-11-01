@@ -7,6 +7,13 @@ deliberate and which are just unfinished.
 Measured on 2026-11-01 against `6d7c727`, with the repo's own tooling and no
 extra instrumentation.
 
+Two passes are recorded here. The first closed the gaps that line coverage
+could see and is everything up to "If you are here to change the floor". The
+second, in [Second pass: behavioural gaps](#second-pass-behavioural-gaps-at-100-line-coverage),
+starts from the conclusion of the first (every module in `src/` at 100%) and
+asks the question percentages cannot: would any test notice if the code were
+wrong?
+
 ## How to reproduce
 
 ```bash
@@ -248,3 +255,245 @@ figure, and neither would have been found by a suite that only had to clear 93%.
 Before narrowing `--cov`, check whether the module you are dropping is one of
 the entry points. Those are the ones that were invisible for long enough to
 grow a module with no tests at all.
+
+# Second pass: behavioural gaps at 100% line coverage
+
+Measured on 2026-11-01 against `e1b2e68`. The first pass ended with every
+module in `src/` at 100% statement and branch coverage, which retires line
+coverage as a way to find anything else. A covered line is only a line that
+ran; it is not a line whose behaviour anything checked.
+
+So this pass asks the other question directly: change the code so it is wrong,
+and see whether the suite fails. A change that leaves the suite green is a
+behaviour no test pins, and the report below is the list of those.
+
+## How to reproduce
+
+```bash
+python -m pytest -q --no-header            # 566 tests
+npm --prefix worker ci && npm --prefix worker test   # 57 tests
+```
+
+Then, for any single claim in the tables below, apply the stated edit to the
+stated file, re-run the suite for that side, and confirm it now fails. 86
+edits were tried: 52 against the Python modules and 34 against the Worker.
+
+No tooling was added for this. A general mutation runner (`mutmut`,
+`cosmic-ray`) would be a new dev dependency inside the `pip-audit --strict`
+gate, and the useful part was not the breadth but choosing edits that
+correspond to a mistake somebody could actually make. The edits are written
+out in full so the pass is repeatable by hand.
+
+### A trap worth knowing about
+
+The first run of the Python half reported 4 surviving edits. The real number
+was 18. CPython validates a cached `.pyc` against the source's modification
+time and size, so a same-length edit that is reverted quickly (`MARK_BATCH =
+51` back to `MARK_BATCH = 50`, or `< 60` back to `< 59`) can leave stale
+bytecode that still gets imported. Later runs were then measuring the previous
+edit rather than the current one, which turns surviving edits into false
+"caught" results.
+
+Anyone repeating this needs `PYTHONDONTWRITEBYTECODE=1` and a cleared
+`__pycache__` between edits. The symptom to watch for is the one that exposed
+it: `grep MARK_BATCH src/services/streaks.py` printing 50 while
+`python -c "from src.services.streaks import MARK_BATCH; print(MARK_BATCH)"`
+prints 51.
+
+## Headline
+
+Both suites are in good shape. 61 of the 86 edits were caught before this
+change, including every edit to a command handler, to the permission guard, to
+the cache-revision fencing in `guild_config.py`, and to the streak arithmetic
+in `summarize()` and `rank()`. The command-handler layer in particular is
+comprehensively pinned: all 7 edits there were caught, so the handlers are not
+where the remaining risk is, which is why this change adds no tests there.
+
+25 edits survived the first measurement (18 Python, 7 Worker). They split four
+ways, and the split matters more than the count:
+
+| Disposition | Count | Meaning |
+| --- | --- | --- |
+| Real gap, now closed | 13 | A behaviour that mattered and that nothing checked |
+| Equivalent edit | 6 | The "wrong" code behaves identically, so no test can tell |
+| Accepted | 3 | Real, but not worth a test or not observable from one |
+| Deferred | 3 | Belongs to open PR #26, which is rewriting that code |
+
+So 13 of the 25 were real, and 12 edits still survive by design. After this
+change 74 of the 86 edits are caught.
+
+Nothing in this pass changed production code. Every finding was a missing
+test, and the one case where production looked less defensive than the edit
+(`{"rows": null}`, below) is recorded rather than quietly changed.
+
+## 1. The longest-streak guarantee, unpinned
+
+The most valuable finding, and the one with a user-visible failure mode.
+
+`worker/src/index.js` closes a streak with:
+
+```sql
+longest_seconds = MAX(longest_seconds, MAX(0, ?1 - active_since)),
+```
+
+Dropping the outer `MAX(longest_seconds, ...)`, so that closing a streak
+simply overwrites the record, left both suites green.
+
+The existing streak test walks 50 seconds and then 75 seconds. Both closes set
+a new best, so the guard is never asked to defend an older record, and the
+assertion passes whether or not it exists. The case that distinguishes them,
+a long streak followed by a short one, was absent.
+
+The effect on a live server: `longest_seconds` is what `/repped` prints as
+"Longest Streak" and what `/leaderboard sort:longest` ranks on. A member with
+a 10-day record who equipped the tag and removed it an hour later would watch
+their record drop to an hour, with no way to recover it, because the previous
+value is gone from D1.
+
+Production is correct. This was only ever a missing test, verified by reading
+the real value back out of local D1 before and after:
+
+```
+after a 10-day streak closes: total 864000, longest 864000
+after a 1-hour streak closes: total 867600, longest 864000   <- record held
+```
+
+Closed by two cases in `worker/test/store.test.mjs`: a shorter streak closing
+after a longer one, and the related guarantee that a running streak which
+beats the record is not banked into `longest_seconds` until it closes.
+
+## 2. Types on the way to the store
+
+A cluster of five edits, all surviving, all the same shape: delete a `str()`
+or `bool()` conversion on the boundary between the bot and the Worker.
+
+| File | Edit | Survived because |
+| --- | --- | --- |
+| `streaks.py` | `str(uid)` to `uid` | Every caller already passes strings |
+| `streaks.py` | `bool(rep)` to `rep` | Every caller already passes real bools |
+| `guild_config.py` | drop `str(guild_id), str(role_id)` | Same |
+| `guild_config.py` | drop `str(g), str(r)` in `all_guilds` | Same |
+| `streaks.py` | drop `str(row["user_id"])` in `rank` | Same |
+
+These conversions are not cosmetic. The Worker screens ids with
+`Number.isSafeInteger` and requires `typeof repping === "boolean"`, so an int
+or a truthy non-bool that reaches it is a 400. Worse, a real 19-digit
+snowflake sent as a JSON number loses precision in transit, before the
+Worker's screen can see it, which is the exact mistake the Worker's own
+comment says `snowflake()` exists to catch. The bot's conversions are its half
+of that contract and nothing held them in place.
+
+Closed in `tests/test_stores.py` by passing int guild ids, int snowflakes and
+truthy/falsy non-bools through `mark_many`, `set_role`, `all_guilds` and
+`rank`, and asserting both the values and their types on the way out.
+
+## 3. `mark()` never tested with `repping=False`
+
+`StreakStore.mark()` is the single-member entry point. Both of its existing
+tests pass `repping=True`, so hardcoding `True` inside it left the suite green.
+
+Scope stated precisely, because it is narrower than it first looks: nothing in
+`src/` calls `mark()`. Production records streaks through `mark_many()`, from
+`tag_sync._record_streaks`. So this is a gap in public API that only tests
+currently exercise, not a live defect.
+
+It is worth pinning anyway, because `mark()` is what a live equip/unequip
+handler would reach for, and the failure mode on that path is a streak that
+can be started and never closed. Closed in `tests/test_stores.py`.
+
+## 4. Smaller gaps, closed
+
+| Finding | Edit that survived | Now pinned by |
+| --- | --- | --- |
+| The guild listing's order was unspecified. `all_guilds()` feeds the startup sync, and `guild_id` is TEXT, so the order is lexicographic ("200", "30", "4"), not numeric. The existing test's two guilds happen to come back in insertion order either way. | drop `ORDER BY guild_id` | `store.test.mjs` |
+| The auth scheme check could be removed entirely. `slice(7)` strips a 7-character scheme either way, so a lowercase `bearer ` was the only thing that could tell the difference. | `startsWith("Bearer ")` to a truthiness check | `store.test.mjs` |
+| 400 responses asserted only their status, never which guard produced them. A JSON array passes `readJson`'s `typeof body === "object"` check, because arrays are objects in JavaScript, and is caught downstream instead. | `typeof` check to a truthiness check | `store.test.mjs` |
+| The day boundary in `humanize()` could be off by one second. 86400 renders as "1d" under both the correct divisor and an 86399 one; only 86399 itself distinguishes them. | `divmod(seconds, 86400)` to `86399` | `test_stores.py` |
+| `disable()` returned the store's raw value where its annotation promises `bool`. | drop `bool(...)` | `test_stores.py` |
+| `leaderboard()`'s default limit of 10 was never exercised, since `/leaderboard` passes it explicitly. | `limit: int = 10` to `3` | `test_stores.py` |
+
+## 5. Equivalent edits: no test could catch these
+
+Worth recording so the next person does not spend time trying. In each case
+the "broken" code behaves identically to the correct code, so a failing test
+is not available.
+
+| Edit | Why it cannot be caught |
+| --- | --- |
+| `humanize`: `if seconds < 60` to `< 59` | 59 falls through to `days=hours=minutes=0`, and the `or "less than a minute"` fallback returns the same string. That fallback is load-bearing, not dead code. |
+| `mark_many`: drop `guild_id = str(guild_id)` | The value is only ever used in an f-string, which calls `str()` anyway. |
+| `summarize`: `if not row:` to `if row is None:` | `summarize({}, now)` returns the same zeros dict as `summarize(None, now)`, verified directly. |
+| `get`: `data.get("row")` to `data.get("row", {})` | `{}` is falsy, so it reaches the same zeros path. |
+| Worker: `count: stmts.length` to `marks.length` | `stmts` is `marks.map(...)`, so the lengths are equal by construction. |
+
+One near-miss belongs here with a caveat. Changing
+`data.get("rows", [])` to `data.get("rows") or []` in `leaderboard()` survives,
+but the two are not identical: on a `{"rows": null}` response the current code
+passes `None` into `rank()`, which raises `TypeError`, while the edit degrades
+to an empty leaderboard. The edit is the more defensive of the two.
+
+Left alone deliberately. The Worker always sends `{rows: results}` with an
+array, so the response is not reachable today, and adding a fallback for a
+shape the store does not produce is a behaviour change rather than a test,
+which is the same line the first pass drew around clock-skew tolerance. It is
+recorded here so the choice is visible.
+
+## 6. Accepted
+
+| Finding | Disposition |
+| --- | --- |
+| Worker: replacing `crypto.subtle.timingSafeEqual` with a plain byte comparison survives. | Correct, and not fixable by a functional test: timing is not observable from the test runner. The observable half, that both sides are hashed so lengths always match, is now pinned by a case that sends a wrong key of exactly the right length. |
+| Worker: `(res.meta && res.meta.changes) > 0` to `res.meta.changes > 0` survives. | Defensive against a driver that omits `meta`. Local D1 always provides it, so there is no way to reach the guard without faking the driver, which the first pass already rejected as vouching for nothing. |
+| `guild_config.py`: `_CACHE_TTL = 60.0` to `600.0` survives. | A tuning constant. Every test sets `cache_ttl` explicitly, which is the right thing for a test to do; pinning the module default would mean asserting on a private attribute to no benefit. |
+
+## 7. Deferred to PR #26
+
+Three surviving edits are in `store_client.py`'s `Retry-After` handling:
+
+| Edit | Unpinned behaviour |
+| --- | --- |
+| `requested_wait > _MAX_RETRY_AFTER` to `>=` | A wait exactly at the 30s cap |
+| `max(0.0, float(raw))` to `float(raw)` | A negative `Retry-After` becoming a negative sleep |
+| the per-attempt `requested_wait = None` reset | A `Retry-After` leaking into the wait after a later transport error |
+
+Not closed here, deliberately. Open PR #26 moves this function out of
+`store_client.py` into a new `src/services/backoff.py` so the Discord REST
+paths can share it, which means a test written against the current location
+would be written against code that is about to move, and would collide with
+that PR in both `store_client.py` and `test_store_client.py`.
+
+The third one is the most interesting of the three and the one to carry over:
+`request()` resets `requested_wait` at the top of each attempt, with a comment
+saying a `Retry-After` only governs the wait after the response that carried
+it. The existing
+`test_retry_after_only_governs_the_response_that_sent_it` does not actually
+pin that, because its second response is another HTTP error that overwrites
+`requested_wait` anyway. The reset only matters when the next attempt raises a
+transport error instead, and no test covers that interleaving.
+
+## Results
+
+| Suite | Before | After |
+| --- | --- | --- |
+| Python tests | 555 | 566 |
+| Worker tests | 42 | 57 |
+| Python coverage | 97.73% | 97.73% |
+| Edits caught (Python) | 34 of 52 | 43 of 52 |
+| Edits caught (Worker) | 27 of 34 | 31 of 34 |
+
+Python coverage does not move, and that is the expected result rather than a
+disappointment: every gap in this pass was behind a line that already ran. A
+pass that found real gaps without moving the percentage is the clearest
+argument available that the percentage had stopped being the useful signal.
+
+## If you are here to add tests
+
+Check the equivalent-edits table first. Six of the twelve surviving edits
+cannot be caught by any test, and three more are accepted for stated reasons,
+so the honest remaining list is the three in PR #26's lane.
+
+When adding a case to an existing sequence, check whether it distinguishes
+anything. The longest-streak gap survived behind an assertion that looked
+thorough: it asserted all four columns, on a sequence where two of them could
+not have been wrong. A monotonically increasing sequence cannot test a
+guard whose whole job is to defend the older value.
