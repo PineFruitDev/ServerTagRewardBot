@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
+from src.core.options import bounded_choice, require_guild_scope
 from src.services.guild_config import GuildConfig
 from src.services.streaks import StreakStore, humanize
 
@@ -47,13 +48,14 @@ class LeaderboardCommand(Command):
         await self._show(interaction, "current")
 
     async def _show(self, interaction: discord.Interaction, sort: str) -> None:
-        guild_id = str(interaction.guild_id)
+        guild_id = await require_guild_scope(interaction)
+        if guild_id is None:
+            return
 
         # streaks.rank() already falls back for an unrecognised sort; normalize
         # here too so the heading lookup cannot raise KeyError, and so the
         # heading always describes the ordering actually used.
-        if sort not in _SORT_LABELS:
-            sort = _DEFAULT_SORT
+        sort = bounded_choice(sort, _SORT_LABELS, _DEFAULT_SORT)
 
         if await GuildConfig.get_instance().get_role(guild_id) is None:
             await interaction.response.send_message(

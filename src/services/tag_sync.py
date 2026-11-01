@@ -10,13 +10,13 @@ the field changes, so role updates land within seconds across every guild.
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import discord
 
+from src.core.options import snowflake
 from src.services.discord_errors import blocks_whole_guild, describe
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
@@ -32,22 +32,10 @@ SYNC_PAUSED_MESSAGE = (
     "Your settings and streaks are safe; roles will catch up once sync resumes."
 )
 
-_SNOWFLAKE = re.compile(r"^\d{1,20}$")
-
-
-def snowflake(value: object) -> str | None:
-    """Return value as a Discord id string, or None when it is not one.
-
-    Gateway payloads are parsed straight from JSON, so every id has to be shape
-    checked before it reaches int() or the store.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return str(value) if value >= 0 else None
-    if isinstance(value, str) and _SNOWFLAKE.match(value):
-        return value
-    return None
+# snowflake() is re-exported: it is imported from here by the gateway path's
+# own tests, and it now backs the command option checks in src/core/options.py
+# too, so the rule has one definition rather than one per caller.
+__all__ = ["GuildStats", "SYNC_PAUSED_MESSAGE", "TagSyncService", "snowflake"]
 
 
 @dataclass
