@@ -114,7 +114,7 @@ async def require_guild_scope(interaction: discord.Interaction) -> str | None:
 
 def target_refusal(
     interaction: discord.Interaction,
-    target: discord.Role | discord.Member,
+    target: discord.Role | discord.Member | discord.User,
     label: str,
 ) -> str | None:
     """Why `target` cannot be acted on here, or None when it can.
@@ -132,8 +132,10 @@ def target_refusal(
       guild, so a foreign role would be stored successfully and then refused by
       Discord for every member from then on.
 
-    A target that states no guild at all is not a shape discord.py produces, so
-    it is accepted rather than guessed at; the id check above still applies.
+    A target that states no guild is accepted rather than guessed at, and the id
+    check above still applies to it. discord.User is the real case: a member
+    option falls back to one when the member is not cached, and a User carries
+    no guild to compare, so there is nothing to disagree with.
     """
     scope = guild_scope(interaction)
     if scope is None:
