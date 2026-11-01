@@ -51,6 +51,23 @@ def user_id(n: int) -> str:
     return str(700000000000000000 + n)
 
 
+def config_for_tests(**overrides) -> Config:
+    """The Config the suites run against: no sync delay, no rate limits.
+
+    Both are off by default so that a test is free to run one command twice or
+    to replay one gateway event. tests/test_cooldowns.py passes the limits it
+    wants here, against a clock it controls.
+    """
+    settings: dict = {
+        "discord_token": "x" * 60, "environment": "test", "sync_on_start": False,
+        "sync_delay_ms": 0, "members_intent": True, "command_cooldown_seconds": 0,
+        "guild_command_limit": 0, "guild_command_window_seconds": 0,
+        "reward_cooldown_seconds": 0,
+    }
+    settings.update(overrides)
+    return Config(**settings)
+
+
 class Clock:
     """A stand-in for time.time() that only moves when a test moves it."""
 
@@ -545,6 +562,6 @@ __all__ = [
     "GUILD", "OTHER_GUILD", "ROLE", "OTHER_ROLE", "MAX_MARKS",
     "Clock", "CommandBot", "FakeClient", "FakeHTTP", "FakeStore", "TagBot",
     "FakeFollowup", "FakeGuild", "FakeInteraction", "FakeMember", "FakeResponse", "FakeRole",
-    "button", "field_values", "http_error", "member_payload", "primary_guild",
-    "streaks_module", "user_id",
+    "button", "config_for_tests", "field_values", "http_error", "member_payload",
+    "primary_guild", "streaks_module", "user_id",
 ]

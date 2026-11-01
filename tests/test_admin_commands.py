@@ -21,9 +21,11 @@ from src.commands.setup import SetupCommand, SyncPromptView
 from src.commands.status import StatusCommand
 from src.commands.sync import SyncCommand
 from src.core.command_manager import CommandManager
+from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.streaks import StreakStore
 from src.services.tag_sync import GuildStats, SYNC_PAUSED_MESSAGE, TagSyncService
+from tests.integration_harness import config_for_tests
 
 
 class FakeTree:
@@ -80,6 +82,16 @@ def config(monkeypatch):
                             set_role=AsyncMock(), disable=AsyncMock(return_value=True))
     monkeypatch.setattr(GuildConfig, "_instance", store)
     return store
+
+
+@pytest.fixture(autouse=True)
+def no_rate_limits(monkeypatch):
+    """This file is about slash wiring, and some of it calls one callback twice.
+
+    The limits themselves are tested in tests/test_cooldowns.py, including
+    through these same registered callbacks.
+    """
+    monkeypatch.setattr(Environment, "_config", config_for_tests())
 
 
 # --- slash wiring -----------------------------------------------------------
@@ -238,7 +250,7 @@ async def test_status_prompts_setup_when_unconfigured(interaction, config, monke
 @pytest.mark.parametrize("syncing,state", [(True, "Running"), (False, "Idle")])
 async def test_status_renders_sync_statistics(interaction, config, monkeypatch, syncing, state):
     stats = GuildStats(members_checked=12, roles_added=3, roles_removed=1,
-                       currently_repping=7, live_updates=5,
+                       currently_repping=7, live_updates=5, duplicates_collapsed=2,
                        last_sync_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
     monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
         stats_for=lambda gid: stats, is_syncing=lambda gid: syncing,
@@ -248,7 +260,7 @@ async def test_status_renders_sync_statistics(interaction, config, monkeypatch, 
 
     embed = interaction.response.send_message.await_args.kwargs["embed"]
     assert [field.value for field in embed.fields] == [
-        "<@&10>", state, "12", "7", "3", "1", "5", "<t:1735689600:R>",
+        "<@&10>", state, "12", "7", "3", "1", "5", "2", "<t:1735689600:R>",
     ]
     assert embed.timestamp is not None
 
