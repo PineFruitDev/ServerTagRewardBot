@@ -32,7 +32,7 @@ Your server needs the Server Tag feature enabled for members to equip a tag.
 
 Discord exposes a member's equipped server tag on the User object as `primary_guild` (`{ identity_guild_id, identity_enabled, tag, badge }`). A member is repping a server's tag when `identity_guild_id` matches that server and `identity_enabled` is true.
 
-The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, so nothing sensitive is stored on the bot host; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
+The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, while the bot host still needs its runtime credentials; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
 
 ## Self-Hosting
 
@@ -59,7 +59,7 @@ The test suites do not need a configured `.env` or live credentials.
 
 > **Required Discord setup:** enable the **Server Members Intent** on the Bot page of the [Developer Portal](https://discord.com/developers/applications) and invite with the **Manage Roles** permission.
 >
-> **Limited mode:** if Discord refuses the Server Members intent (close code 4014, e.g. while a verified bot's intent request is pending), the bot logs a warning and reconnects without it. Slash commands keep working from the store; live tag sync and role updates stay off until the intent is granted and the bot restarts. Set `MEMBERS_INTENT=false` to start in limited mode directly.
+> **Limited mode:** if Discord refuses the Server Members intent (close code 4014, e.g. while a verified bot's intent request is pending), the bot logs a warning and reconnects without it. Slash commands keep working from the store; live tag sync and role updates stay off until the intent is granted and the bot restarts. Use `MEMBERS_INTENT` to control whether that intent is requested.
 >
 > **Storage:** deploy the Worker in `worker/` (see `worker/wrangler.toml`), then set `TAGBOT_STORE_URL` and `TAGBOT_STORE_KEY`. `scripts/migrate_sqlite_to_d1.py` imports a legacy `data.db`; `scripts/smoke_test.py` checks a running store.
 
@@ -153,11 +153,11 @@ register.py                   # Command registration
 
 ## Commands
 
-- `/setup role:@Role` - Configure this server's reward role (requires Manage Server)
+- `/setup role:@Role` - Configure this server's reward role (defaults to Manage Server access)
 - `/repped [user]` - Current, longest, and all-time tag streaks for you or another member
 - `/leaderboard [sort]` - Top reppers by current streak, longest streak, or all-time repped
 - `/status` - This server's sync statistics
-- `/sync` - Manual full member sync (requires Manage Server)
+- `/sync` - Manual full member sync (defaults to Manage Server access)
 - `/disable` - Stop managing the reward role in this server
 - `/ping` - Basic ping/pong with latency
 - `/help [command]` - Auto-generated help system
@@ -169,25 +169,35 @@ The Worker also requires the `TAGBOT_STORE_KEY` secret and the `DB` D1 binding
 configured in `worker/wrangler.toml`. Registration contacts Discord; run it
 only when you intend to update the application’s slash commands.
 
-| Variable | Required | Accepted values | Description |
-|----------|----------|-----------------|-------------|
-| `DISCORD_TOKEN` | ✅ | dotted string, 50+ characters | Bot token from Discord Developer Portal |
-| `DEVELOPER_IDS` | ❌ | comma-separated 17-20 digit IDs | User IDs for developer commands |
-| `ENVIRONMENT` | ❌ | `development` or `production` (default) | Environment mode; sets the log level. Anything else is logged and read as `production` |
-| `SYNC_ON_START` | ❌ | boolean (default `false`) | Sync all configured servers at startup; /setup offers the first sync |
-| `SYNC_DELAY_MS` | ❌ | whole milliseconds (default `350`) | Throttle before each user re-fetch during sync. Over `1000` is logged as a likely typo, since it applies per member, but is honoured |
-| `TAGBOT_STORE_URL` | ✅ | `https://` URL, or `http://localhost` for `wrangler dev` | HTTPS URL of the tagbot-store Worker |
-| `TAGBOT_STORE_KEY` | ✅ | 32+ characters | Bearer secret for the Worker (keep in a secrets manager) |
-| `MEMBERS_INTENT` | ❌ | boolean (default `true`) | Request the Server Members intent; falls back to limited mode if refused |
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `DISCORD_TOKEN` | Yes | Discord bot authentication |
+| `TAGBOT_STORE_URL` | Yes | Storage Worker endpoint |
+| `TAGBOT_STORE_KEY` | Yes | Shared bearer secret for bot and Worker |
+| `DEVELOPER_IDS` | No | Developer-command allowlist |
+| `ENVIRONMENT` | No | Application logging mode |
+| `SYNC_ON_START` | No | Reconcile configured servers after startup |
+| `SYNC_DELAY_MS` | No | Delay before each user re-fetch during full sync |
+| `MEMBERS_INTENT` | No | Request the Server Members privileged intent |
 
-Booleans accept `true`/`1`/`yes`/`on` and `false`/`0`/`no`/`off`, in any case.
-A blank value is treated as unset and takes the default; anything unparseable
-fails startup rather than being quietly read as `false`.
+Variable names are listed without values. Validation rules and defaults are
+implemented in [`environment.py`](src/services/environment.py).
 
-> **If you are upgrading:** `SYNC_ON_START` previously recognised only the
-> literal `true`, so `SYNC_ON_START=yes`, `on` or `1` meant *off*. Those forms
-> now mean *on*, as documented, and the next restart will sync every configured
-> server. Set it to `false` first if you do not want that.
+### Permissions
+
+`/setup`, `/disable`, and `/sync` declare Manage Server as their default
+Discord command permission. Server administrators can override application
+command permissions in Discord; the current shared runtime guard checks the
+**bot's** Manage Roles permission, not the invoker's Manage Server permission.
+Review command access in server integration settings accordingly.
+
+The bot's highest role must be above the reward role. `/setup` rejects the
+server's default role and managed integration roles. `/disable` stops managing
+rewards but leaves existing member roles in place. Other commands declare no
+administrative permission requirement.
+
+For deployment prerequisites, failure recovery, and log interpretation, see the
+[operator runbook](docs/operator-runbook.md).
 
 ## License Note
 This project is licensed under **[Apache 2.0](https://choosealicense.com/licenses/apache-2.0/) + the [Commons Clause](https://commonsclause.com/)**. In plain terms:
