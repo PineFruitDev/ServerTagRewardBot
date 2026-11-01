@@ -136,9 +136,30 @@ register.py                   # Command registration
 - `/leaderboard [sort]` - Top reppers by current streak, longest streak, or all-time repped
 - `/status` - This server's sync statistics
 - `/sync` - Manual full member sync (requires Manage Server)
-- `/disable` - Stop managing the reward role in this server
+- `/disable` - Stop managing the reward role in this server (requires Manage Server)
 - `/ping` - Basic ping/pong with latency
 - `/help [command]` - Auto-generated help system
+
+### Who can run the admin commands
+
+`/setup`, `/disable` and `/sync` change state, so each requires **Manage Server** or
+**Administrator**, and the bot checks that itself on every run. Discord's
+`default_member_permissions` only sets the default a server can reassign under Server
+Settings, Integrations, Command Permissions, so it is treated as the convenience it is
+rather than as the gate. Anyone else gets a private reply naming what they need.
+
+Two further checks protect the reward role, because Manage Server does not grant Manage
+Roles:
+
+- a role carrying **Administrator** is never accepted as the reward, since the reward is
+  handed to everyone who equips the tag
+- the reward must sit **below your own highest role**, mirroring Discord's own rule that
+  you cannot hand out a role you could not assign yourself (Administrators and the owner
+  are exempt, as Discord treats them as holding every permission)
+
+The bot's own role still has to sit above the reward role for it to be granted at all.
+`/setup` checks that before it writes anything, and `/sync` reports it if it changes
+later.
 
 ## Environment Variables
 
