@@ -132,6 +132,35 @@ def test_requires_url_and_key(monkeypatch):
         StoreClient()
 
 
+async def test_get_instance_reuses_one_client(monkeypatch):
+    """Every caller shares a connection pool; rebuilding per call would leak sessions."""
+    monkeypatch.setenv("TAGBOT_STORE_URL", "https://store.example")
+    monkeypatch.setenv("TAGBOT_STORE_KEY", KEY)
+
+    client = StoreClient.get_instance()
+    try:
+        assert StoreClient.get_instance() is client
+    finally:
+        await client.close()
+
+
+async def test_a_new_client_becomes_the_shared_one():
+    """main() constructs the client explicitly; get_instance() must hand that one out."""
+    explicit = StoreClient("https://store.example", KEY)
+    try:
+        assert StoreClient.get_instance() is explicit
+    finally:
+        await explicit.close()
+
+
+def test_get_instance_without_credentials_explains_itself(monkeypatch):
+    """Reaching for the store unconfigured should name the variables, not TypeError."""
+    monkeypatch.delenv("TAGBOT_STORE_URL", raising=False)
+    monkeypatch.delenv("TAGBOT_STORE_KEY", raising=False)
+    with pytest.raises(StoreError, match="TAGBOT_STORE_URL"):
+        StoreClient.get_instance()
+
+
 @pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504])
 async def test_retryable_statuses_use_bounded_exponential_backoff(monkeypatch, status):
     from unittest.mock import AsyncMock
