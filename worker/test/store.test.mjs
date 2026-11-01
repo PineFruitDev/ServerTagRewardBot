@@ -210,8 +210,46 @@ describe("tagbot-store HTTP contract with local D1", { concurrency: false }, () 
     assert.ok(saved.active_since >= before && saved.active_since <= Math.floor(Date.now() / 1000));
   });
 
+  // An unusable `now` falls back to the wall clock rather than being stored as
+  // sent. Storing it would be the expensive mistake: active_since = 0 looks
+  // like a streak running since 1970, so the next close credits the member with
+  // five decades of repping and the leaderboard never recovers.
+  for (const [name, now] of [
+    ["zero", 0], ["negative", -100], ["fractional", 1.5],
+    ["a string", "100"], ["null", null], ["out of integer range", 1e21],
+  ]) {
+    test(`a ${name} timestamp falls back to the current clock`, async () => {
+      const before = Math.floor(Date.now() / 1000);
+      await ok("/streaks/1/mark", { method: "POST", body: { now, marks: [{ user_id: "42", repping: true }] } });
+
+      const saved = await row();
+      assert.ok(saved.active_since >= before && saved.active_since <= Math.floor(Date.now() / 1000),
+        `active_since ${saved.active_since} came from the request, not the clock`);
+    });
+  }
+
+  test("a rejected timestamp cannot inflate a total on close", async () => {
+    await ok("/streaks/1/mark", { method: "POST", body: { now: 0, marks: [{ user_id: "42", repping: true }] } });
+    await ok("/streaks/1/mark", { method: "POST", body: { now: 0, marks: [{ user_id: "42", repping: false }] } });
+
+    const saved = await row();
+    assert.equal(saved.active_since, null);
+    // Both ends fell back to the same clock, so the interval is seconds, not an epoch.
+    assert.ok(saved.total_seconds < 60, `credited ${saved.total_seconds}s for an instant streak`);
+    assert.ok(saved.longest_seconds < 60);
+  });
+
+  test("a usable timestamp is still honoured exactly", async () => {
+    await mark("1", 1700000000, [["42", true]]);
+    assert.equal((await row()).active_since, 1700000000);
+  });
+
   test("unknown paths and unsupported methods return 404", async () => {
-    for (const [path, method] of [["/unknown", "GET"], ["/health", "POST"], ["/guilds/1", "DELETE"]]) {
+    for (const [path, method] of [
+      ["/unknown", "GET"], ["/health", "POST"], ["/guilds/1", "DELETE"],
+      ["/streaks", "GET"], ["/guilds/1/unknown", "POST"], ["/guilds/1/disable", "GET"],
+      ["/streaks/1/mark", "PUT"], ["/health/1", "GET"], ["/", "GET"],
+    ]) {
       assert.deepEqual(await request(path, { method }), { status: 404, body: { error: "not found" } });
     }
   });

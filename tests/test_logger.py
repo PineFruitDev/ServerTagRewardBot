@@ -1,6 +1,8 @@
 import io
 import json
 import logging
+from collections import UserDict
+from types import MappingProxyType
 
 import pytest
 
@@ -93,6 +95,38 @@ def test_exception_argument_does_not_disclose_response_body():
     assert "unlabelled-private-body" not in output
     assert "RuntimeError" in output
     assert isinstance(record.args[0], RuntimeError)
+
+
+@pytest.mark.parametrize("wrap", [dict, MappingProxyType, UserDict], ids=["dict", "proxy", "userdict"])
+def test_mapping_arguments_are_scrubbed_like_positional_ones(wrap):
+    """logging turns a lone mapping into record.args, bypassing the tuple path.
+
+    No call site formats this way today, but the formatter's promise not to
+    serialize an exception message cannot depend on which %-style the caller
+    picked, or the first `log.error("%(exc)s", {...})` quietly breaks it. Any
+    Mapping counts, not just dict, for the same reason.
+    """
+    args = wrap({"exc": RuntimeError("unlabelled-private-body")})
+    record = logging.LogRecord("StoreClient", logging.ERROR, "", 0,
+                               "request failed (%(exc)s)", (args,), None)
+    assert record.args is args, "logging no longer unwraps a lone mapping"
+
+    output = JsonFormatter().format(record)
+
+    assert "unlabelled-private-body" not in output
+    assert "RuntimeError" in output
+    # The caller's own mapping must not be mutated; it may be reused or inspected.
+    assert isinstance(args["exc"], RuntimeError)
+
+
+def test_a_message_with_no_arguments_formats_cleanly():
+    """record.args is None for log.info("..."), the most common call shape."""
+    record = logging.LogRecord("Main", logging.INFO, "", 0, "Shutdown complete", None, None)
+
+    entry = json.loads(JsonFormatter().format(record))
+
+    assert entry["message"] == "Shutdown complete"
+    assert entry["level"] == "INFO"
 
 
 @pytest.fixture

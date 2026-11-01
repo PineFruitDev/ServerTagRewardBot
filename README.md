@@ -209,7 +209,7 @@ then run both suites from the repository root:
 python -m pip install -r requirements-dev.txt
 python -m ruff check .
 python -m mypy
-python -m pytest -q --cov=src --cov=scripts --cov-branch --cov-report=term-missing --cov-fail-under=93
+python -m pytest -q --cov=src --cov=scripts --cov=main --cov=register --cov-branch --cov-report=term-missing --cov-fail-under=97
 npm --prefix worker ci
 node --check worker/src/index.js
 npm --prefix worker test
@@ -218,9 +218,10 @@ npm --prefix worker test
 The Python suite covers tag detection, role reconciliation, pagination and sync
 failures, slash command wiring and guards, the post-setup sync prompt, command
 and button failure reporting (including what the reply and the log leave out),
-configuration, storage retries and caching, streak math, and the one-time
-SQLite-to-D1 migration. Discord calls are mocked; HTTP client tests use a
-loopback server. Pytest blocks non-loopback connections, ignores `.env`, and
+configuration, storage retries and caching, streak math, both entry points
+(startup order, the process exit codes, and command registration), and the
+one-time SQLite-to-D1 migration. Discord calls are mocked; HTTP client tests
+use a loopback server. Pytest blocks non-loopback connections, ignores `.env`, and
 isolates configuration and service singletons between tests. No Discord or
 Cloudflare credentials are needed.
 
@@ -242,12 +243,17 @@ HTTP routes and SQL for authorization, validation, guild configuration, streak
 transitions, and guild isolation. It does not use `wrangler.toml`, remote D1, or
 deployment commands. Dependencies must be installed before running offline.
 
-GitHub Actions runs Python tests on 3.12 and 3.13 with a 93% branch-inclusive
-coverage floor across `src` and `scripts`, a typecheck job, and the Worker suite
-on Node.js 22, for pull requests and pushes to `main`. Workflow permissions are
-read-only, actions are pinned to full commit SHAs, checkout does not persist
-credentials, and superseded pull request runs are cancelled. This verifies local
-behavior, not a live Discord connection or production deployment.
+`docs/coverage-gaps.md` records what the suites measure, what they do not, and
+why, re-measured with the commands above. Read it before widening or loosening
+the coverage scope.
+
+GitHub Actions runs Python tests on 3.12 and 3.13 with a 97% branch-inclusive
+coverage floor across `src`, `scripts`, `main.py` and `register.py`, a typecheck
+job, and the Worker suite on Node.js 22, for pull requests and pushes to `main`.
+Workflow permissions are read-only, actions are pinned to full commit SHAs,
+checkout does not persist credentials, and superseded pull request runs are
+cancelled. This verifies local behavior, not a live Discord connection or
+production deployment.
 
 ### Submitting changes
 

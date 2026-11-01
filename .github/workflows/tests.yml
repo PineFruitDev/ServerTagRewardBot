@@ -36,10 +36,12 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Lint Python
         run: python -m ruff check .
-      # Gate the whole package plus the hand-run scripts, not just src/services:
-      # commands, core and scripts were previously measured by nothing.
+      # Gate every production module, including the two entry points. main.py
+      # and register.py sit outside src/ and were measured by nothing, so the
+      # floor could not see that register.py had no tests at all. See
+      # docs/coverage-gaps.md for how the scope and the floor were chosen.
       - name: Test Python with coverage
-        run: python -m pytest -q --cov=src --cov=scripts --cov-branch --cov-report=term-missing --cov-fail-under=93
+        run: python -m pytest -q --cov=src --cov=scripts --cov=main --cov=register --cov-branch --cov-report=term-missing --cov-fail-under=97
 
   typecheck:
     name: Typecheck

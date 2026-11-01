@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 # Matched against environment variable *names* to decide whose values must
@@ -25,6 +26,15 @@ _CREDENTIAL = re.compile(
     r"[^\s,;\"'}&]+"
 )
 _URL = re.compile(r"https?://[^\s<>\"']+", re.I)
+
+
+def _as_type_name(arg: object) -> object:
+    """Replace an exception with its class name, leaving anything else alone.
+
+    An exception's str() is whatever the library put in it: a response body, a
+    rejected URL, a credential. The type is the part worth logging.
+    """
+    return type(arg).__name__ if isinstance(arg, BaseException) else arg
 
 
 def _redact(value: str) -> str:
@@ -47,10 +57,14 @@ class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         record = copy.copy(record)
         if isinstance(record.args, tuple):
-            record.args = tuple(
-                type(arg).__name__ if isinstance(arg, BaseException) else arg
-                for arg in record.args
-            )
+            record.args = tuple(_as_type_name(arg) for arg in record.args)
+        elif isinstance(record.args, Mapping):
+            # logging unwraps a lone mapping argument, so %(name)s formatting
+            # arrives as a mapping rather than a tuple. It carries exceptions
+            # just as easily, so it has to be scrubbed the same way. Mapping,
+            # not dict: logging accepts any of them, and MappingProxyType or a
+            # UserDict would otherwise slip through unscrubbed.
+            record.args = {key: _as_type_name(value) for key, value in record.args.items()}
         payload = {
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
             "level": record.levelname,
