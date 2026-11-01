@@ -30,7 +30,8 @@ class ReppedCommand(Command):
     async def execute(self, interaction: discord.Interaction) -> None:
         await self._show(interaction, interaction.user)
 
-    async def _show(self, interaction: discord.Interaction, member: discord.Member) -> None:
+    async def _show(self, interaction: discord.Interaction,
+                    member: discord.Member | discord.User) -> None:
         guild_id = str(interaction.guild_id)
 
         if await GuildConfig.get_instance().get_role(guild_id) is None:

@@ -201,10 +201,11 @@ loopback server. Pytest blocks non-loopback connections, ignores `.env`, and
 isolates configuration and service singletons between tests. No Discord or
 Cloudflare credentials are needed.
 
-`mypy.ini` holds the typecheck scope. It checks every production module, and
-baselines a single error code per module where discord.py's own annotations
-disagree with its runtime payloads, so every other error stays enforced
-everywhere. Tests are not typechecked.
+`mypy.ini` holds the typecheck scope. It checks every production module with no
+per-module error suppressions, so every error code is enforced everywhere. Where
+discord.py's annotations and this bot's runtime used to disagree, the code now
+narrows or widens explicitly at the call site instead. Tests are not
+typechecked.
 
 The migration tests replay the script's generated SQL onto a database built
 from `worker/migrations/0001_initial.sql`, so the generated statements and the

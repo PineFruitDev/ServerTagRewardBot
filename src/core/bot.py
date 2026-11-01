@@ -12,17 +12,30 @@ from src.services.store_client import StoreClient, StoreError, StoreUnavailable
 log = get_logger("Bot")
 
 
+class CommandTree(app_commands.CommandTree["Bot"]):
+    """Command tree that reports failures through the bot's error handler.
+
+    Overriding on_error keeps the handler part of the tree's type rather than
+    rebinding the method on the instance.
+    """
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, /) -> None:
+        await self.client._on_tree_error(interaction, error)
+
+
 class Bot(discord.Client):
     """Discord client wired to the centralized command registry."""
 
     def __init__(self, commands: list[Command], intents: discord.Intents | None = None, **client_options):
         super().__init__(intents=intents or discord.Intents.default(), **client_options)
-        self.tree = app_commands.CommandTree(self)
+        self.tree = CommandTree(self)
         self.command_manager = CommandManager(commands)
         self.command_manager.register_all(self.tree)
-        self.tree.on_error = self._on_tree_error
         # True when running without the Server Members intent (tag sync off)
         self.limited_mode = False
+        # Set once on_ready has pushed the command tree to Discord, so a
+        # reconnect does not sync the same commands again.
+        self.commands_synced = False
 
     async def on_ready(self) -> None:
         log.info("on_ready - Logged in as %s", self.user)

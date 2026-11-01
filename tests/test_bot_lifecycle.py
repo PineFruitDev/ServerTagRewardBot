@@ -11,11 +11,20 @@ from unittest.mock import AsyncMock
 import discord
 import pytest
 
-from src.core.bot import Bot
+from src.core.bot import Bot, CommandTree
 
 
 def fake_response(status=500, reason="Internal Server Error"):
     return SimpleNamespace(status=status, reason=reason)
+
+
+async def test_tree_on_error_routes_to_the_bot_handler():
+    """The override is the only path Discord uses to report a command failure."""
+    handler = AsyncMock()
+    tree = SimpleNamespace(client=SimpleNamespace(_on_tree_error=handler))
+    interaction, error = object(), RuntimeError("boom")
+    await CommandTree.on_error(tree, interaction, error)
+    handler.assert_awaited_once_with(interaction, error)
 
 
 async def test_on_ready_logs_the_connected_user(caplog):

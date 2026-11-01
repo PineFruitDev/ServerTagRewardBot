@@ -18,7 +18,10 @@ class SyncPromptView(discord.ui.View):
 
     async def _finish(self, interaction: discord.Interaction, message: str) -> None:
         for child in self.children:
-            child.disabled = True
+            # The base Item type has no disabled flag; this view holds only
+            # buttons, so nothing is skipped in practice.
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
         await interaction.response.edit_message(content=message, view=self)
 
     @discord.ui.button(label="Sync now", style=discord.ButtonStyle.primary, emoji="🔄")
@@ -78,6 +81,13 @@ class SetupCommand(Command):
 
     async def _configure(self, interaction: discord.Interaction, role: discord.Role) -> None:
         guild = interaction.guild
+        if guild is None:
+            # guard() turns DMs away before this runs, so this only catches a
+            # direct call; every line below needs a real guild.
+            await interaction.response.send_message(
+                "❌ This command can only be used in servers.", ephemeral=True
+            )
+            return
 
         # Sanity checks that save admins a support message later
         if role.is_default() or role.managed:
