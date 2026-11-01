@@ -168,11 +168,12 @@ instead of trusting `str(interaction.guild_id)`, which turns a missing guild int
 the literal string `"None"`.
 
 A refusal is always a private (ephemeral) reply naming the option at fault, and
-nothing reaches the store or Discord's REST API before it. Two tests walk
-`src/commands` so this cannot quietly regress: one fails if an option is declared
-without a range, a set of choices, or a resolved entity type, and one fails if a
-name or description outgrows Discord's own limits, catching it in CI rather than
-as a 400 from a hand-run `register.py`.
+nothing reaches the store or Discord's REST API before it. A walk of
+`src/commands` keeps this from quietly regressing: it fails if an option is
+declared without a range, a set of choices, or a resolved entity type, if an
+option has no description, or if a name or description outgrows Discord's own
+limits, catching that last one in CI rather than as a 400 from a hand-run
+`register.py`.
 
 ## Environment Variables
 
