@@ -35,6 +35,12 @@ OPTIONAL_VARS = {
     # Request the Server Members privileged intent. If Discord refuses it, the
     # bot falls back to limited mode anyway; set false to skip the attempt.
     "MEMBERS_INTENT": "true",
+    # Rate limits. Each is a whole number and each is off at 0; see
+    # src/services/cooldowns.py for what the three scopes do.
+    "COMMAND_COOLDOWN_SECONDS": "5",
+    "GUILD_COMMAND_LIMIT": "20",
+    "GUILD_COMMAND_WINDOW_SECONDS": "60",
+    "REWARD_COOLDOWN_SECONDS": "30",
 }
 
 #: What Config.is_development and Config.is_production compare against. A value
@@ -60,6 +66,20 @@ _EXPECTED = {
 _TOKEN_MIN_LENGTH = 50
 _STORE_KEY_MIN_LENGTH = 32
 
+#: Whole-number limits, and what each one counts. The description is what an
+#: operator sees when the value will not parse, so it says what the number
+#: means rather than restating its name.
+_LIMIT_VARS = {
+    "COMMAND_COOLDOWN_SECONDS": "whole seconds one member waits between uses of the same "
+                                "command in one server, or 0 for no per-member cooldown",
+    "GUILD_COMMAND_LIMIT": "a whole number of uses of one command allowed per server per "
+                           "window, or 0 for no per-server limit",
+    "GUILD_COMMAND_WINDOW_SECONDS": "whole seconds the per-server command window covers, "
+                                    "or 0 for no per-server limit",
+    "REWARD_COOLDOWN_SECONDS": "whole seconds an applied reward decision suppresses "
+                               "repeats of itself, or 0 to apply every repeat",
+}
+
 # A full sync waits this long before every member re-fetch, so the value is
 # multiplied by the member count. Past a second each it is more likely a typo
 # (350000 for 350) than a deliberate throttle, which is worth saying out loud
@@ -75,6 +95,12 @@ class Config:
     sync_delay_ms: int
     members_intent: bool = True
     developer_ids: list[str] = field(default_factory=list)
+    #: Rate limits, in the units their variable names give. Defaults match
+    #: OPTIONAL_VARS so a Config built directly is the documented one.
+    command_cooldown_seconds: int = 5
+    guild_command_limit: int = 20
+    guild_command_window_seconds: int = 60
+    reward_cooldown_seconds: int = 30
 
     @property
     def is_development(self) -> bool:
@@ -119,9 +145,14 @@ class Environment:
                 discord_token=cls._setting("DISCORD_TOKEN"),
                 environment=cls._setting("ENVIRONMENT", "production").lower(),
                 sync_on_start=cls._as_bool("SYNC_ON_START", default=False),
-                sync_delay_ms=int(cls._setting("SYNC_DELAY_MS", "350")),
+                sync_delay_ms=cls._as_int("SYNC_DELAY_MS", default=350),
                 members_intent=cls._as_bool("MEMBERS_INTENT", default=True),
                 developer_ids=cls._split_ids(cls._setting("DEVELOPER_IDS")),
+                command_cooldown_seconds=cls._as_int("COMMAND_COOLDOWN_SECONDS", default=5),
+                guild_command_limit=cls._as_int("GUILD_COMMAND_LIMIT", default=20),
+                guild_command_window_seconds=cls._as_int("GUILD_COMMAND_WINDOW_SECONDS",
+                                                         default=60),
+                reward_cooldown_seconds=cls._as_int("REWARD_COOLDOWN_SECONDS", default=30),
             )
         return cls._config
 
@@ -186,6 +217,10 @@ class Environment:
             log.warning("validate - SYNC_DELAY_MS is %s ms, applied before every member "
                         "re-fetch; a full sync of a large server will take hours", delay)
 
+        for name, expected in _LIMIT_VARS.items():
+            if not cls._setting(name).isdigit():
+                problems.append(f"{name} must be {expected}")
+
         # Position rather than value: an ID pasted into the wrong variable could
         # be a credential, and this message goes to the logs.
         for position, dev_id in enumerate(cls._split_ids(cls._setting("DEVELOPER_IDS")), start=1):
@@ -241,6 +276,17 @@ class Environment:
             return False
         return default
 
+    @classmethod
+    def _as_int(cls, name: str, *, default: int) -> int:
+        """Read one of the whole-number settings. validate() rejects anything else.
+
+        Falls back rather than raising, for the same reason _as_bool does: a
+        value this cannot read has already failed validation, and get_config is
+        also reachable from tests and tooling that never called it.
+        """
+        raw = cls._setting(name)
+        return int(raw) if raw.isdigit() else default
+
     @staticmethod
     def _split_ids(raw: str) -> list[str]:
         return [part.strip() for part in raw.split(",") if part.strip()]
@@ -258,6 +304,11 @@ class Environment:
         log.info("validate - Discord token: present, format accepted (value not logged)")
         log.info("validate - Store key: present, format accepted (value not logged)")
         log.info("validate - Store host: %s", urlsplit(cls._setting("TAGBOT_STORE_URL")).hostname)
+        config = cls.get_config()
+        log.info("validate - Rate limits: %ss per member per command, %s uses per server per "
+                 "%ss, %ss of reward duplicate collapsing (0 means off)",
+                 config.command_cooldown_seconds, config.guild_command_limit,
+                 config.guild_command_window_seconds, config.reward_cooldown_seconds)
         dev_ids = cls._split_ids(cls._setting("DEVELOPER_IDS"))
         if dev_ids:
             log.info("validate - Developer IDs configured: %d", len(dev_ids))

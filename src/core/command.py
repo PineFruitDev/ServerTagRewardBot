@@ -2,7 +2,7 @@
 
 Each command extends Command, describes itself with CommandHelpInfo, and
 registers its own slash command against the tree. Validation (guild-only,
-permissions, developer-only) is shared here so commands stay tiny, and so is
+permissions, developer-only) and rate limiting are shared here so commands stay tiny, and so is
 observation: every registered callback opens with `async with
 self.observed(interaction)` so its log lines are correlated and its outcome
 and latency are recorded without each command repeating that.
@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import discord
 from discord import app_commands
 
+from src.services.cooldowns import Cooldowns, Wait
 from src.services.environment import Environment
 from src.services.logger import get_logger
 from src.services.observability import DENIED, CommandRun, mark, observed
@@ -66,6 +67,14 @@ class Command(ABC):
     #: Whether this command can only be used by developers
     developer_only: bool = False
 
+    #: Seconds one member must wait between uses of this command in one server.
+    #: None takes COMMAND_COOLDOWN_SECONDS; 0 turns the per-member limit off.
+    user_cooldown: float | None = None
+
+    #: (uses, seconds) this command allows per server. None takes
+    #: GUILD_COMMAND_LIMIT over GUILD_COMMAND_WINDOW_SECONDS.
+    guild_rate: tuple[int, float] | None = None
+
     @property
     def name(self) -> str:
         return self.help_info.name
@@ -112,14 +121,40 @@ class Command(ABC):
 
         return True, None
 
-    async def guard(self, interaction: discord.Interaction) -> bool:
-        """Validate and report failures to the user. Returns True when clear to run."""
+    def cooldown(self, interaction: discord.Interaction, name: str) -> Wait | None:
+        """The wait this run has to serve, or None when it may proceed."""
+        guild_id = interaction.guild_id
+        return Cooldowns.get_instance().check_command(
+            name, str(interaction.user.id), None if guild_id is None else str(guild_id),
+            user_seconds=self.user_cooldown, guild_rate=self.guild_rate,
+        )
+
+    async def guard(self, interaction: discord.Interaction, *, name: str | None = None) -> bool:
+        """Validate, rate limit, and report either failure to the user.
+
+        Returns True when clear to run. `name` separates the commands that
+        share one Command object (/setup and /disable), so that running one
+        does not put the other on cooldown.
+        """
+        name = name or self.name
         valid, reason = await self.validate(interaction)
         if not valid:
             # The reason is one of this module's own fixed strings, and who was
             # refused is already on the line as the user field, so nothing
             # user-controlled (a display name least of all) goes in here.
             mark(DENIED)
-            log.warning("guard - /%s refused: %s", self.name, reason)
+            log.warning("guard - /%s refused: %s", name, reason)
             await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
-        return valid
+            return False
+
+        # Checked after validation, so a run that was never going to happen
+        # does not spend the member's cooldown or the server's budget.
+        waiting = self.cooldown(interaction, name)
+        if waiting is not None:
+            mark(DENIED)
+            log.info("guard - /%s rate limited (%s scope, %.1fs left)",
+                     name, waiting.scope, waiting.seconds)
+            await interaction.response.send_message(waiting.message(name), ephemeral=True)
+            return False
+
+        return True

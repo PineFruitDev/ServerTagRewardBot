@@ -73,7 +73,7 @@ class SetupCommand(Command):
             # Named explicitly: this callback belongs to SetupCommand, so the
             # default would log every /disable as a /setup.
             async with self.observed(interaction, "disable"):
-                if not await self.guard(interaction):
+                if not await self.guard(interaction, name="disable"):
                     return
                 was_configured = await GuildConfig.get_instance().disable(str(interaction.guild_id))
                 message = (
