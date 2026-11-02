@@ -19,6 +19,7 @@ class SyncCommand(Command):
     )
 
     required_permissions = ("manage_roles",)
+    required_user_permissions = ("manage_guild", "administrator")
     guild_only = True
 
     # The most expensive thing the bot can be asked to do: one API call per

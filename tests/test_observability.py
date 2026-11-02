@@ -288,8 +288,8 @@ async def test_spawned_work_does_not_keep_the_id_of_whoever_started_it(ui, store
 
 async def test_a_button_press_is_correlated_and_names_the_command_it_came_from(ui):
     """A component interaction carries no command, so the view has to supply it."""
-    view = SyncPromptView(GUILD)
     pressed = FakeInteraction()
+    view = SyncPromptView(GUILD, pressed.user.id)
     # What discord.py really hands a component callback: the press knows which
     # message it came from, but not which command sent that message.
     pressed.command = None
