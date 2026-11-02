@@ -16,6 +16,7 @@ by name and by what was expected instead.
 import os
 import re
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 from src.services.logger import get_logger
@@ -23,9 +24,6 @@ from src.services.logger import get_logger
 log = get_logger("Environment")
 
 REQUIRED_VARS = ("DISCORD_TOKEN", "TAGBOT_STORE_URL", "TAGBOT_STORE_KEY")
-
-# Plain http is only allowed for a local `wrangler dev` store
-_LOCAL_HTTP = re.compile(r"^http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)")
 
 OPTIONAL_VARS = {
     "ENVIRONMENT": "production",
@@ -43,9 +41,7 @@ OPTIONAL_VARS = {
     "REWARD_COOLDOWN_SECONDS": "30",
 }
 
-#: What Config.is_development and Config.is_production compare against. A value
-#: outside the set is reported and then read as production, which is what every
-#: current consumer already does with it.
+#: Recognized logging modes. Other deployment labels retain production logging.
 ENVIRONMENTS = ("development", "production")
 
 _BOOL_TRUE = ("true", "1", "yes", "on")
@@ -53,7 +49,8 @@ _BOOL_FALSE = ("false", "0", "no", "off")
 
 _BOOL_VARS = ("SYNC_ON_START", "MEMBERS_INTENT")
 
-_SNOWFLAKE = re.compile(r"^\d{17,20}$")
+_SNOWFLAKE = re.compile(r"[0-9]{17,20}")
+_MAX_INTEGER = 2**31 - 1
 
 #: What to say when a required setting is missing. Kept beside REQUIRED_VARS so
 #: a new required var cannot be added without telling operators where to get it.
@@ -89,7 +86,7 @@ _SYNC_DELAY_WARN_MS = 1000
 
 @dataclass
 class Config:
-    discord_token: str
+    discord_token: str = field(repr=False)
     environment: str
     sync_on_start: bool
     sync_delay_ms: int
@@ -115,10 +112,14 @@ class Environment:
     """Validates configuration once at startup, then serves it everywhere."""
 
     _config: Config | None = None
+    _validated_config: Config | None = None
 
     @classmethod
     def validate(cls) -> None:
         """Validate all environment variables. Raises SystemExit on failure."""
+        if cls._config is not None and cls._config is cls._validated_config:
+            return
+        cls._config = None
         log.info("validate - Validating environment variables...")
 
         cls._apply_defaults()
@@ -135,26 +136,34 @@ class Environment:
                 "on purpose; check them in your .env or secret manager."
             )
 
+        cls._config = cls._read_config()
+        cls._validated_config = cls._config
         log.info("validate - Environment validation passed ✅")
         cls._log_environment_info()
 
     @classmethod
     def get_config(cls) -> Config:
+        # Tools may read defaults before startup. validate() always replaces
+        # this provisional object after checking every setting successfully.
         if cls._config is None:
-            cls._config = Config(
-                discord_token=cls._setting("DISCORD_TOKEN"),
-                environment=cls._setting("ENVIRONMENT", "production").lower(),
-                sync_on_start=cls._as_bool("SYNC_ON_START", default=False),
-                sync_delay_ms=cls._as_int("SYNC_DELAY_MS", default=350),
-                members_intent=cls._as_bool("MEMBERS_INTENT", default=True),
-                developer_ids=cls._split_ids(cls._setting("DEVELOPER_IDS")),
-                command_cooldown_seconds=cls._as_int("COMMAND_COOLDOWN_SECONDS", default=5),
-                guild_command_limit=cls._as_int("GUILD_COMMAND_LIMIT", default=20),
-                guild_command_window_seconds=cls._as_int("GUILD_COMMAND_WINDOW_SECONDS",
-                                                         default=60),
-                reward_cooldown_seconds=cls._as_int("REWARD_COOLDOWN_SECONDS", default=30),
-            )
+            cls._config = cls._read_config()
         return cls._config
+
+    @classmethod
+    def _read_config(cls) -> Config:
+        return Config(
+            discord_token=cls._setting("DISCORD_TOKEN"),
+            environment=cls._setting("ENVIRONMENT", "production").lower(),
+            sync_on_start=cls._as_bool("SYNC_ON_START", default=False),
+            sync_delay_ms=cls._as_int("SYNC_DELAY_MS", default=350),
+            members_intent=cls._as_bool("MEMBERS_INTENT", default=True),
+            developer_ids=cls._split_ids(cls._setting("DEVELOPER_IDS")),
+            command_cooldown_seconds=cls._as_int("COMMAND_COOLDOWN_SECONDS", default=5),
+            guild_command_limit=cls._as_int("GUILD_COMMAND_LIMIT", default=20),
+            guild_command_window_seconds=cls._as_int("GUILD_COMMAND_WINDOW_SECONDS",
+                                                     default=60),
+            reward_cooldown_seconds=cls._as_int("REWARD_COOLDOWN_SECONDS", default=30),
+        )
 
     @classmethod
     def _apply_defaults(cls) -> None:
@@ -167,7 +176,7 @@ class Environment:
         for name, default in OPTIONAL_VARS.items():
             if not cls._setting(name):
                 os.environ[name] = default
-                log.info("validate - Set default for %s: %s", name, default)
+                log.info("validate - Set default for %s", name)
 
     @classmethod
     def _check_required(cls) -> list[str]:
@@ -192,41 +201,34 @@ class Environment:
         """Report each optional setting whose value cannot be interpreted."""
         problems = []
 
-        # An unrecognised ENVIRONMENT is a warning, not a failure: everything
-        # that reads it (currently just the log level) already treats anything
-        # other than "development" as production, so refusing to boot over
-        # ENVIRONMENT=staging would be an outage with nothing behind it.
-        environment = cls._setting("ENVIRONMENT").lower()
-        if environment not in ENVIRONMENTS:
-            log.warning("validate - ENVIRONMENT is not one of %s; treating it as production",
-                        ", ".join(ENVIRONMENTS))
+        if cls._setting("ENVIRONMENT").lower() not in ENVIRONMENTS:
+            # This labels logging, not an authorization or endpoint boundary.
+            # Preserve existing deployments using labels such as staging.
+            log.warning("validate - ENVIRONMENT is not development or production; "
+                        "using production logging")
 
         for name in _BOOL_VARS:
             if cls._setting(name).lower() not in _BOOL_TRUE + _BOOL_FALSE:
                 problems.append(f"{name} must be a boolean "
                                 f"({'/'.join(_BOOL_TRUE)} or {'/'.join(_BOOL_FALSE)})")
 
-        delay = cls._setting("SYNC_DELAY_MS")
-        if not delay.isdigit():
-            problems.append("SYNC_DELAY_MS must be a whole number of milliseconds, 0 or more")
-        elif int(delay) > _SYNC_DELAY_WARN_MS:
-            # Deliberately not an error. A long throttle only makes a
-            # background sync slower, and the one thing worse than a slow sync
-            # is an operator who has to raise their request rate against the
-            # Discord API to get the bot to start.
-            log.warning("validate - SYNC_DELAY_MS is %s ms, applied before every member "
-                        "re-fetch; a full sync of a large server will take hours", delay)
+        delay = cls._parse_integer(cls._setting("SYNC_DELAY_MS"))
+        if delay is None:
+            problems.append(f"SYNC_DELAY_MS must be whole milliseconds from 0 to {_MAX_INTEGER}")
+        elif delay > _SYNC_DELAY_WARN_MS:
+            log.warning("validate - SYNC_DELAY_MS exceeds the recommended delay; "
+                        "a full sync of a large server may take hours")
 
         for name, expected in _LIMIT_VARS.items():
-            if not cls._setting(name).isdigit():
-                problems.append(f"{name} must be {expected}")
+            if cls._parse_integer(cls._setting(name)) is None:
+                problems.append(f"{name} must be {expected}; maximum {_MAX_INTEGER}")
 
         # Position rather than value: an ID pasted into the wrong variable could
         # be a credential, and this message goes to the logs.
         for position, dev_id in enumerate(cls._split_ids(cls._setting("DEVELOPER_IDS")), start=1):
-            if not _SNOWFLAKE.match(dev_id):
+            if not _SNOWFLAKE.fullmatch(dev_id) or not 0 < int(dev_id) < 2**64:
                 problems.append(f"DEVELOPER_IDS entry {position} is not a Discord user ID "
-                                "(17-20 digits, from Discord's Developer Mode > Copy User ID)")
+                                "(17-20 ASCII digits within the unsigned 64-bit range)")
 
         return problems
 
@@ -236,29 +238,50 @@ class Environment:
         if name == "DISCORD_TOKEN":
             # Length and shape only. A near-miss token is still a live
             # credential, so nothing about the value is quoted back.
-            if len(value) <= _TOKEN_MIN_LENGTH or "." not in value:
+            if (len(value) <= _TOKEN_MIN_LENGTH or "." not in value
+                    or re.fullmatch(r"[A-Za-z0-9_.-]+", value) is None):
                 return (f"a bot token is a dotted string longer than {_TOKEN_MIN_LENGTH} characters "
+                        "without whitespace or non-token characters "
                         "(Developer Portal > Bot > Reset Token, copied whole)")
         elif name == "TAGBOT_STORE_URL":
             return cls._unusable_store_url(value)
         elif name == "TAGBOT_STORE_KEY":
-            if len(value) < _STORE_KEY_MIN_LENGTH:
-                # The length of an already-rejected key is the one detail that
-                # distinguishes a truncated paste from the wrong variable.
-                return (f"expected at least {_STORE_KEY_MIN_LENGTH} characters, got {len(value)}; "
-                        "this is the Worker's bearer secret, not the Discord token")
+            if len(value) < _STORE_KEY_MIN_LENGTH or re.fullmatch(r"[!-~]+", value) is None:
+                return (f"expected at least {_STORE_KEY_MIN_LENGTH} printable ASCII characters "
+                        "without whitespace; use the Worker's bearer secret")
         return None
 
     @staticmethod
     def _unusable_store_url(value: str) -> str | None:
-        if _LOCAL_HTTP.match(value):
-            return None
-        parts = urlsplit(value)
-        if parts.scheme != "https":
-            return ("must be an https:// URL; plain http is only accepted for a local "
-                    "wrangler dev store on localhost or 127.0.0.1")
-        if not parts.hostname:
-            return "looks like an https:// URL but has no hostname"
+        # URL parsers can include their input in exceptions; never surface it.
+        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value) or "\\" in value:
+            return "must be a URL without whitespace or control characters"
+        try:
+            parts = urlsplit(value)
+            host = parts.hostname
+            port = parts.port
+            if parts.netloc.startswith("[") and not re.fullmatch(r"\[[^]]+\](?::[0-9]+)?", parts.netloc):
+                return "must have a well-formed bracketed host and port"
+            if not host:
+                return "must have a hostname"
+            if parts.username is not None or parts.password is not None or "?" in value or "#" in value:
+                return "must not contain credentials, a query, or a fragment"
+            if port == 0 or parts.netloc.endswith(":"):
+                return "must have a valid port when specified"
+            try:
+                ip_address(host)
+            except ValueError:
+                if len(host) > 253 or any(
+                    re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None
+                    for label in host.removesuffix(".").split(".")
+                ):
+                    return "must have a valid hostname"
+            if parts.scheme != "https" and not (
+                parts.scheme == "http" and host in ("localhost", "127.0.0.1")
+            ):
+                return "must use HTTPS, or HTTP on localhost or 127.0.0.1 for local development"
+        except ValueError:
+            return "must be a well-formed URL with a valid host and port"
         return None
 
     @staticmethod
@@ -276,16 +299,21 @@ class Environment:
             return False
         return default
 
+    @staticmethod
+    def _parse_integer(raw: str) -> int | None:
+        """Bound conversion before int(), including Python's digit-count limit."""
+        if not raw.isascii() or not raw.isdecimal():
+            return None
+        significant = raw.lstrip("0") or "0"
+        if len(significant) > 10:
+            return None
+        value = int(significant)
+        return value if value <= _MAX_INTEGER else None
+
     @classmethod
     def _as_int(cls, name: str, *, default: int) -> int:
-        """Read one of the whole-number settings. validate() rejects anything else.
-
-        Falls back rather than raising, for the same reason _as_bool does: a
-        value this cannot read has already failed validation, and get_config is
-        also reachable from tests and tooling that never called it.
-        """
-        raw = cls._setting(name)
-        return int(raw) if raw.isdigit() else default
+        value = cls._parse_integer(cls._setting(name))
+        return default if value is None else value
 
     @staticmethod
     def _split_ids(raw: str) -> list[str]:
@@ -300,15 +328,5 @@ class Environment:
         slips past the logger's redaction (which can only match whole values),
         so "present" is all this line is allowed to say.
         """
-        log.info("validate - Environment: %s", cls._setting("ENVIRONMENT"))
-        log.info("validate - Discord token: present, format accepted (value not logged)")
-        log.info("validate - Store key: present, format accepted (value not logged)")
-        log.info("validate - Store host: %s", urlsplit(cls._setting("TAGBOT_STORE_URL")).hostname)
-        config = cls.get_config()
-        log.info("validate - Rate limits: %ss per member per command, %s uses per server per "
-                 "%ss, %ss of reward duplicate collapsing (0 means off)",
-                 config.command_cooldown_seconds, config.guild_command_limit,
-                 config.guild_command_window_seconds, config.reward_cooldown_seconds)
-        dev_ids = cls._split_ids(cls._setting("DEVELOPER_IDS"))
-        if dev_ids:
-            log.info("validate - Developer IDs configured: %d", len(dev_ids))
+        for name in (*REQUIRED_VARS, *OPTIONAL_VARS):
+            log.info("validate - %s: present, format accepted (value not logged)", name)
