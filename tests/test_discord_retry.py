@@ -258,7 +258,8 @@ def sync(monkeypatch):
     streaks = SimpleNamespace(mark_many=AsyncMock())
     monkeypatch.setattr(GuildConfig, "_instance", config)
     monkeypatch.setattr(StreakStore, "_instance", streaks)
-    monkeypatch.setattr(Environment, "_config", SimpleNamespace(sync_delay_ms=0))
+    from tests.integration_harness import config_for_tests
+    monkeypatch.setattr(Environment, "_config", config_for_tests())
     return SimpleNamespace(service=TagSyncService(client), http=http,
                            config=config, streaks=streaks)
 
@@ -478,3 +479,14 @@ async def test_a_rate_limited_error_reply_does_not_raise_again(sleep):
     await Bot._on_tree_error(None, interaction, RuntimeError("original failure"))
     # Not retried: the interaction token is single-use and expires.
     blow_up.assert_awaited_once()
+
+
+def test_standalone_registration_client_has_the_same_wait_ceiling():
+    # register.py constructs Bot directly, without main.build_bot's options.
+    bot = Bot([])
+    assert bot.http.max_ratelimit_timeout == discord_retry.MAX_RATELIMIT_TIMEOUT
+
+
+def test_an_explicit_client_wait_ceiling_is_preserved():
+    bot = Bot([], max_ratelimit_timeout=60)
+    assert bot.http.max_ratelimit_timeout == 60

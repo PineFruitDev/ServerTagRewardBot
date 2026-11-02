@@ -40,12 +40,13 @@ class HelpCommand(Command):
         # oversized input is rejected before it ever reaches the bot.
         async def help_cmd(interaction: discord.Interaction,
                            command: app_commands.Range[str, 1, 32] | None = None) -> None:
-            if not await self.guard(interaction):
-                return
-            if command:
-                await self._show_specific(interaction, command)
-            else:
-                await self._show_all(interaction)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                if command:
+                    await self._show_specific(interaction, command)
+                else:
+                    await self._show_all(interaction)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         await self._show_all(interaction)

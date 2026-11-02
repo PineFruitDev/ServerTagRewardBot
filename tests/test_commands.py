@@ -15,6 +15,7 @@ from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreError, StoreUnavailable
 from src.services.tag_sync import GuildStats, SYNC_PAUSED_MESSAGE, TagSyncService
+from tests.integration_harness import config_for_tests
 
 
 @pytest.fixture
@@ -38,7 +39,7 @@ async def test_guard_rejects_unavailable_context(interaction, monkeypatch, failu
         interaction.guild.me.guild_permissions.manage_roles = False
     else:
         command.developer_only = True
-        monkeypatch.setattr(Environment, "_config", SimpleNamespace(developer_ids=["99"]))
+        monkeypatch.setattr(Environment, "_config", config_for_tests(developer_ids=["99"]))
     assert await command.guard(interaction) is False
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
 
@@ -74,7 +75,7 @@ def test_a_guildless_interaction_grants_no_permissions():
 async def test_guard_allows_configured_developer(interaction, monkeypatch):
     command = SyncCommand()
     command.developer_only = True
-    monkeypatch.setattr(Environment, "_config", SimpleNamespace(developer_ids=["42"]))
+    monkeypatch.setattr(Environment, "_config", config_for_tests(developer_ids=["42"]))
     assert await command.guard(interaction) is True
     interaction.response.send_message.assert_not_awaited()
 
@@ -108,6 +109,17 @@ async def test_setup_explains_itself_when_its_own_roles_are_unknown(interaction,
     await SetupCommand()._configure(interaction, Role())
     store.set_role.assert_not_awaited()
     assert "my own roles" in interaction.response.send_message.await_args.args[0]
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+async def test_setup_refuses_a_call_with_no_guild(interaction, monkeypatch):
+    """guard() turns DMs away first, but _configure must not assume a guild."""
+    store = SimpleNamespace(set_role=AsyncMock())
+    monkeypatch.setattr(GuildConfig, "_instance", store)
+    interaction.guild = None
+    await SetupCommand()._configure(interaction, Role())
+    store.set_role.assert_not_awaited()
+    assert "only be used in servers" in interaction.response.send_message.await_args.args[0]
     assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
 
 
