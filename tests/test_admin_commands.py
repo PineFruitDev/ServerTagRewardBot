@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
 from src.commands import build_registry
@@ -208,6 +209,14 @@ async def test_sync_prompt_explains_limited_mode(interaction, view, monkeypatch)
     monkeypatch.setattr(TagSyncService, "_instance", None)
     await view.sync_now.callback(interaction)
     assert SYNC_PAUSED_MESSAGE in interaction.response.edit_message.await_args.kwargs["content"]
+
+
+async def test_sync_prompt_disables_its_buttons_among_other_items(interaction, view):
+    """The base Item type has no disabled flag, so the loop has to pick buttons out."""
+    view.add_item(discord.ui.Select(options=[discord.SelectOption(label="x")]))
+    await view.later.callback(interaction)
+    buttons = [c for c in view.children if isinstance(c, discord.ui.Button)]
+    assert len(buttons) == 2 and all(b.disabled for b in buttons)
 
 
 async def test_sync_prompt_later_leaves_sync_untouched(interaction, view, monkeypatch):

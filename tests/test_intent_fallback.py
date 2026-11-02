@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import main
+from src.core.bot import CommandTree
 from src.services.environment import Config
 from src.services.tag_sync import TagSyncService
 from src.services.guild_config import GuildConfig
@@ -67,6 +68,10 @@ async def test_build_bot_modes():
     full = main.build_bot(_config(), members=True)
     assert full.intents.members is True and full.limited_mode is False
     assert TagSyncService.get_instance() is not None
+    # The tree subclass is what reports command failures to the user; a plain
+    # app_commands.CommandTree would log them and never reply.
+    assert isinstance(full.tree, CommandTree)
+    assert full.commands_synced is False
 
     limited = main.build_bot(_config(), members=False)
     assert limited.intents.members is False and limited.limited_mode is True

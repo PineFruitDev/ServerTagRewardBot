@@ -5,13 +5,16 @@ from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
 from src.core.options import require_guild_scope, target_refusal
+from src.core.view import GuardedView
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 from src.services.tasks import spawn
 
 
-class SyncPromptView(discord.ui.View):
+class SyncPromptView(GuardedView):
     """Final step of setup: offer to run the first sync right away."""
+
+    command_name = "setup"
 
     def __init__(self, guild_id: str):
         super().__init__(timeout=300)
@@ -19,7 +22,10 @@ class SyncPromptView(discord.ui.View):
 
     async def _finish(self, interaction: discord.Interaction, message: str) -> None:
         for child in self.children:
-            child.disabled = True
+            # The base Item type has no disabled flag; this view holds only
+            # buttons, so nothing is skipped in practice.
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
         await interaction.response.edit_message(content=message, view=self)
 
     @discord.ui.button(label="Sync now", style=discord.ButtonStyle.primary, emoji="🔄")
@@ -57,31 +63,43 @@ class SetupCommand(Command):
         @app_commands.describe(role="The role to grant while the server tag is equipped")
         @app_commands.default_permissions(manage_guild=True)
         async def setup(interaction: discord.Interaction, role: discord.Role) -> None:
-            if not await self.guard(interaction):
-                return
-            await self._configure(interaction, role)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self._configure(interaction, role)
 
         @tree.command(name="disable", description="Stop managing the tag reward role in this server")
         @app_commands.default_permissions(manage_guild=True)
         async def disable(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
-                return
-            scope = await require_guild_scope(interaction)
-            if scope is None:
-                return
-            was_configured = await GuildConfig.get_instance().disable(scope)
-            message = (
-                "🛑 Tag rewards disabled for this server. Existing roles are left as they are; run /setup to turn it back on."
-                if was_configured else
-                "ℹ️ This server wasn't configured yet. Run /setup to get started."
-            )
-            await interaction.response.send_message(message, ephemeral=True)
+            # Named explicitly: this callback belongs to SetupCommand, so the
+            # default would log every /disable as a /setup.
+            async with self.observed(interaction, "disable"):
+                if not await self.guard(interaction):
+                    return
+                scope = await require_guild_scope(interaction)
+                if scope is None:
+                    return
+                was_configured = await GuildConfig.get_instance().disable(scope)
+                message = (
+                    "🛑 Tag rewards disabled for this server. Existing roles are left as they are; "
+                    "run /setup to turn it back on."
+                    if was_configured else
+                    "ℹ️ This server wasn't configured yet. Run /setup to get started."
+                )
+                await interaction.response.send_message(message, ephemeral=True)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Use /setup role:@Role to configure.", ephemeral=True)
 
     async def _configure(self, interaction: discord.Interaction, role: discord.Role) -> None:
         guild = interaction.guild
+        if guild is None:
+            # guard() turns DMs away before this runs, so this only catches a
+            # direct call; every line below needs a real guild.
+            await interaction.response.send_message(
+                "❌ This command can only be used in servers.", ephemeral=True
+            )
+            return
 
         # The role option decides what gets persisted and what every later
         # grant targets, so bound it before anything is written: a usable id,

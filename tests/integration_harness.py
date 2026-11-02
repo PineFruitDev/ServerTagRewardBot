@@ -16,12 +16,19 @@ So the fakes here are behavioural rather than recording:
   call sequence.
 * TagBot and CommandBot wire the real GuildConfig, StreakStore and TagSyncService
   (and, for commands, the real Bot and command tree) between those two fakes.
+* captured_logs stands in for stdout, so a test can assert on the lines the bot
+  really wrote, redaction and all.
 
 Fixtures that build these live in conftest.py.
 """
 
+import contextlib
+import io
+import itertools
 import json
+import logging
 import re
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import discord
@@ -29,6 +36,7 @@ import discord
 from src.services import streaks as streaks_module
 from src.services.environment import Config
 from src.services.guild_config import GuildConfig
+from src.services.logger import JsonFormatter
 from src.services.store_client import StoreError
 from src.services.streaks import StreakStore
 from src.services.tag_sync import TagSyncService
@@ -398,6 +406,15 @@ class CommandBot(TagBot):
         await command.callback(interaction, *args, **kwargs)
         return interaction
 
+    async def drive(self, name: str, **interaction):
+        """As run(), supplying arguments that reach the end of /name.
+
+        For a test about something every command does rather than about one
+        command's behaviour. See COMMAND_ARGUMENTS.
+        """
+        return await self.run(name, *COMMAND_ARGUMENTS[name](),
+                              interaction=FakeInteraction(**interaction))
+
     async def close(self) -> None:
         await self.bot.close()
 
@@ -489,14 +506,23 @@ class FakeGuild:
         self.me = FakeMember(user_id(99), name="TagBot") if me is _UNSET else me
 
 
+#: Interaction ids, handed out in sequence. Discord's are snowflakes, and the
+#: correlation id is derived from this, so the harness issues a distinct one per
+#: interaction rather than letting them all share a value.
+_next_interaction_id = itertools.count(1000000000000000001)
+
+
 class FakeInteraction:
     """A guild interaction: enough of discord.Interaction for a command to run."""
 
     def __init__(self, guild=_UNSET, user: FakeMember | None = None,
                  app_permissions: discord.Permissions | None = None, dm: bool = False):
+        self.id = next(_next_interaction_id)
         self.guild = None if dm else (FakeGuild() if guild is _UNSET else guild)
         self.guild_id = None if self.guild is None else self.guild.id
         self.user = user if user is not None else FakeMember(user_id(1), name="Admin")
+        # Only /ping reads this, and only for the gateway latency.
+        self.client = SimpleNamespace(latency=0.05)
         self.response = FakeResponse()
         self.followup = FakeFollowup()
         self.command = SimpleNamespace(name="test")
@@ -528,6 +554,23 @@ class FakeInteraction:
         return self.followup.messages[0]["content"] or ""
 
 
+#: Arguments good enough to reach the end of each slash command the bot
+#: registers, so a test about something every command does can drive the whole
+#: surface instead of a hand-picked sample. Listed rather than discovered: a
+#: command added later is missing from here, and the tests that walk this say
+#: so rather than quietly covering one command fewer.
+COMMAND_ARGUMENTS = {
+    "setup": lambda: (FakeRole(),),
+    "disable": tuple,
+    "status": tuple,
+    "sync": tuple,
+    "repped": tuple,
+    "leaderboard": lambda: (SimpleNamespace(value="longest"),),
+    "ping": tuple,
+    "help": lambda: ("ping",),
+}
+
+
 def button(view: discord.ui.View, label: str) -> discord.ui.Button:
     """The button carrying this label, so tests click by label rather than by index."""
     for child in view.children:
@@ -541,10 +584,80 @@ def field_values(embed: discord.Embed) -> dict[str, str]:
     return {field.name.split(" ", 1)[-1]: field.value for field in embed.fields}
 
 
+# --------------------------------------------------------------------------- #
+# Logs
+# --------------------------------------------------------------------------- #
+
+
+class LogCapture:
+    """What the bot's log handlers wrote, raw and parsed."""
+
+    def __init__(self, buffer: io.StringIO):
+        self._buffer = buffer
+
+    @property
+    def raw(self) -> str:
+        """Every byte written, exactly as it would have reached stdout."""
+        return self._buffer.getvalue()
+
+    def lines(self, logger: str | None = None, message: str | None = None) -> list[dict]:
+        """The parsed entries, optionally narrowed to one logger or substring."""
+        entries = [json.loads(line) for line in self.raw.splitlines() if line.strip()]
+        return [entry for entry in entries
+                if (logger is None or entry["logger"] == logger)
+                and (message is None or message in entry["message"])]
+
+    def one(self, logger: str | None = None, message: str | None = None) -> dict:
+        """The single matching entry, asserting that there is exactly one."""
+        found = self.lines(logger, message)
+        assert len(found) == 1, f"expected one {logger}/{message} line, got {found}"
+        return found[0]
+
+
+@contextlib.contextmanager
+def captured_logs(level: int = logging.DEBUG) -> Iterator[LogCapture]:
+    """Collect everything the bot's own JSON handlers write, in one buffer.
+
+    This swaps the stream on the handlers that are already installed rather
+    than adding a handler of its own, which is what makes it a test of the
+    deployed configuration: records pass through the same JsonFormatter
+    instances the bot wired up at import time, so what lands in the buffer is
+    what would have landed on stdout. Adding a plain handler instead would
+    measure the test's formatter, not the bot's.
+
+    Levels are lowered for the duration so the DEBUG lines a development
+    deployment would show are captured too, then restored: loggers are global
+    process state and leaking a level change breaks whatever runs next.
+    """
+    buffer = io.StringIO()
+    levels: list[tuple[logging.Logger, int]] = []
+    streams: list[tuple[logging.StreamHandler, object]] = []
+    for name in list(logging.Logger.manager.loggerDict):
+        logger = logging.getLogger(name)
+        handlers = [handler for handler in getattr(logger, "handlers", [])
+                    if isinstance(handler.formatter, JsonFormatter)
+                    and isinstance(handler, logging.StreamHandler)]
+        if not handlers:
+            continue
+        levels.append((logger, logger.level))
+        logger.setLevel(level)
+        for handler in handlers:
+            streams.append((handler, handler.stream))
+            handler.setStream(buffer)
+    assert streams, "no JSON log handlers to capture; import the bot's modules first"
+    try:
+        yield LogCapture(buffer)
+    finally:
+        for handler, stream in streams:
+            handler.setStream(stream)
+        for logger, original in levels:
+            logger.setLevel(original)
+
+
 __all__ = [
-    "GUILD", "OTHER_GUILD", "ROLE", "OTHER_ROLE", "MAX_MARKS",
-    "Clock", "CommandBot", "FakeClient", "FakeHTTP", "FakeStore", "TagBot",
+    "COMMAND_ARGUMENTS", "GUILD", "OTHER_GUILD", "ROLE", "OTHER_ROLE", "MAX_MARKS",
+    "Clock", "CommandBot", "FakeClient", "FakeHTTP", "FakeStore", "LogCapture", "TagBot",
     "FakeFollowup", "FakeGuild", "FakeInteraction", "FakeMember", "FakeResponse", "FakeRole",
-    "button", "field_values", "http_error", "member_payload", "primary_guild",
+    "button", "captured_logs", "field_values", "http_error", "member_payload", "primary_guild",
     "streaks_module", "user_id",
 ]

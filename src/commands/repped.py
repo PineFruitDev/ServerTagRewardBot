@@ -24,14 +24,16 @@ class ReppedCommand(Command):
         @tree.command(name="repped", description="See how long you (or someone else) have been repping the server tag")
         @app_commands.describe(user="Whose streak to check (defaults to you)")
         async def repped(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
-            if not await self.guard(interaction):
-                return
-            await self._show(interaction, user or interaction.user)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self._show(interaction, user or interaction.user)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         await self._show(interaction, interaction.user)
 
-    async def _show(self, interaction: discord.Interaction, member: discord.Member) -> None:
+    async def _show(self, interaction: discord.Interaction,
+                    member: discord.Member | discord.User) -> None:
         # The member option becomes a store path segment below, and the whole
         # reply is built from the target, so bound it before either happens.
         guild_id = await require_guild_scope(interaction)
