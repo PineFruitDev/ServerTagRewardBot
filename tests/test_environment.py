@@ -241,6 +241,56 @@ def test_an_ordinary_sync_delay_is_not_flagged(valid_env, monkeypatch, caplog):
     assert "take hours" not in caplog.text
 
 
+# --------------------------------------------------------------------------- #
+# Rate limits
+# --------------------------------------------------------------------------- #
+
+LIMIT_VARS = ("COMMAND_COOLDOWN_SECONDS", "GUILD_COMMAND_LIMIT",
+              "GUILD_COMMAND_WINDOW_SECONDS", "REWARD_COOLDOWN_SECONDS")
+
+
+def test_rate_limits_default_to_the_documented_values(valid_env):
+    Environment.validate()
+    config = Environment.get_config()
+    assert config.command_cooldown_seconds == 5
+    assert (config.guild_command_limit, config.guild_command_window_seconds) == (20, 60)
+    assert config.reward_cooldown_seconds == 30
+
+
+@pytest.mark.parametrize("name", LIMIT_VARS)
+@pytest.mark.parametrize("value", ["-1", "1.5", "none", "5s"])
+def test_an_unreadable_rate_limit_fails_startup(valid_env, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(SystemExit, match=name):
+        Environment.validate()
+
+
+@pytest.mark.parametrize("name", LIMIT_VARS)
+def test_a_rate_limit_of_zero_is_accepted_as_off(valid_env, monkeypatch, name):
+    """Turning one limit off must not need a second switch to mean it."""
+    monkeypatch.setenv(name, "0")
+    Environment.validate()
+    assert getattr(Environment.get_config(), name.lower()) == 0
+
+
+def test_configured_rate_limits_reach_the_config(valid_env, monkeypatch):
+    for name, value in zip(LIMIT_VARS, ("30", "5", "120", "0")):
+        monkeypatch.setenv(name, value)
+    Environment.validate()
+    config = Environment.get_config()
+    assert config.command_cooldown_seconds == 30
+    assert (config.guild_command_limit, config.guild_command_window_seconds) == (5, 120)
+    assert config.reward_cooldown_seconds == 0
+
+
+def test_startup_logs_the_limits_that_are_in_force(valid_env, caplog):
+    """An operator reporting "it told me to wait" needs the numbers in the log."""
+    with caplog.at_level("INFO"):
+        Environment.validate()
+    assert "Rate limits" in caplog.text
+    assert "20 uses per server per 60s" in caplog.text
+
+
 @pytest.mark.parametrize("url", ["https://", "https:///path", "not-a-url", "ftp://store.invalid"])
 def test_a_store_url_without_a_usable_host_is_rejected(valid_env, monkeypatch, url):
     monkeypatch.setenv("TAGBOT_STORE_URL", url)

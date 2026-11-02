@@ -17,6 +17,7 @@ Built on the [PyTemplateBot](https://github.com/PineFruitDev/PyTemplateBot) arch
 - **First Sync, Your Call**: setup ends by asking "Would you like to sync your server tag rewards now?" with one-click buttons
 - **Streaks & Leaderboard**: `/repped` shows anyone's current, longest, and all-time tag streaks; `/leaderboard` ranks the server's most loyal reppers
 - **Admin Commands**: `/sync` for manual reconciliation, `/status` for live statistics, `/disable` to opt out
+- **Spam Resistant**: Per-member and per-server command cooldowns with friendly "try again in 5 seconds" replies, and duplicate reward grants collapsed instead of re-applied
 - **Production Ready**: Per-guild stats, rate-limit friendly syncing, and clean architecture
 
 ## Using the Bot (server admins)
@@ -33,6 +34,38 @@ Your server needs the Server Tag feature enabled for members to equip a tag.
 Discord exposes a member's equipped server tag on the User object as `primary_guild` (`{ identity_guild_id, identity_enabled, tag, badge }`). A member is repping a server's tag when `identity_guild_id` matches that server and `identity_enabled` is true.
 
 The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, while the bot host still needs its runtime credentials; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
+
+### Cooldowns and rate limits
+
+Commands and reward grants are both protected from being spammed, in
+deliberately different ways, because only one of them is safe to refuse.
+
+**Commands can be refused.** Every slash command carries two limits: one per
+member per server (`COMMAND_COOLDOWN_SECONDS`, 5 by default) and one for the
+server as a whole (`GUILD_COMMAND_LIMIT` uses per `GUILD_COMMAND_WINDOW_SECONDS`,
+20 per minute by default). Whichever trips, the member gets a friendly ephemeral
+reply telling them how long to wait, and the run costs no store round trip. The
+two are weighed together before either is spent, so a member refused because the
+server is busy does not also start their own cooldown. `/sync` sets its own
+stricter limits (one per admin per minute, three per server per five minutes)
+because it is the one command that costs an API call per member.
+
+**Reward grants cannot be refused.** Dropping one would leave a member wearing a
+role they no longer earn, or missing one they do, until something else noticed.
+So grants are never rate limited; instead, repeats are collapsed. `GUILD_MEMBER_UPDATE`
+fires for *every* member edit (a nickname, a timeout, someone else's roles), each
+carrying the same unchanged tag state and costing a store write to re-record a
+streak that has not moved. For `REWARD_COOLDOWN_SECONDS` after successful role
+reconciliation and streak persistence, an event is skipped only if it both repeats that same decision and carries
+roles that already agree with it. So nothing that has anything to say is ever
+dropped: a tag that actually changed is acted on (equip, unequip and equip again
+inside one second still produces all three role updates), an event showing the
+reward role pulled by hand restores it, and a failed write records nothing at all
+so the next event retries it. `/status` reports how many events were skipped.
+
+Every limit is off at `0`, and all of them are per process and in memory, which
+needs no storage and loses nothing worse than one redundant role write on a
+restart.
 
 ## Self-Hosting
 
@@ -202,6 +235,7 @@ src/
 │   └── help_command.py       # Auto-generated help
 └── services/
     ├── tag_sync.py           # ← Tag detection + role sync engine (multi-guild)
+    ├── cooldowns.py          # Command rate limits + reward duplicate collapsing
     ├── guild_config.py       # Per-server reward roles (tagbot-store)
     ├── streaks.py            # Streak tracking (tagbot-store)
     ├── logger.py             # Structured JSON logging with credential redaction
@@ -232,8 +266,8 @@ Every option is bounded twice: once in the declaration Discord validates against
 and once at runtime in `src/core/options.py`, on the value that actually arrived.
 The second pass is not redundant. Discord checks an option against the command
 definition it holds on file, which is a cached copy of a past build, and
-`register.py` is a manual step here, so a build whose options have changed runs
-against a stale definition until someone re-registers. discord.py closes only
+the bot refreshes that definition on its first ready event. A client can still
+send a stale option while definitions propagate. discord.py closes only
 part of that gap itself: an undeclared **choice** value raises before the callback
 runs, but a **`Range` is declaration-only** (`RangeTransformer` passes the value
 through untouched), so it bounds nothing once the command is live.
@@ -277,6 +311,10 @@ only when you intend to update the application’s slash commands.
 | `SYNC_ON_START` | No | Reconcile configured servers after startup |
 | `SYNC_DELAY_MS` | No | Delay before each user re-fetch during full sync |
 | `MEMBERS_INTENT` | No | Request the Server Members privileged intent |
+| `COMMAND_COOLDOWN_SECONDS` | No | Wait between one member's uses of the same command in one server. `0` disables |
+| `GUILD_COMMAND_LIMIT` | No | Uses of one command allowed per server per window. `0` disables |
+| `GUILD_COMMAND_WINDOW_SECONDS` | No | Length of that per-server window. `0` disables |
+| `REWARD_COOLDOWN_SECONDS` | No | How long an applied reward decision suppresses repeats of itself. `0` applies every repeat |
 
 Variable names are listed without values. Validation rules and defaults are
 implemented in [`environment.py`](src/services/environment.py).
@@ -324,7 +362,7 @@ npm --prefix worker test
 ```
 
 The Python suite covers tag detection, role reconciliation, pagination and sync
-failures, slash command wiring and guards, the post-setup sync prompt, command
+failures, cooldowns and reward duplicate collapsing, slash command wiring and guards, the post-setup sync prompt, command
 and button failure reporting (including what the reply and the log leave out),
 per-command correlation and outcome reporting, credential redaction across
 every surface that writes a log line, configuration, storage retries and

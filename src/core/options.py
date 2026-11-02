@@ -13,9 +13,8 @@ telling apart, because only one of them is a guarantee:
   runtime. Whatever Discord sends reaches the callback verbatim.
 
 The definition Discord validates against is also a cached copy of a past build,
-and ``register.py`` is a manual step in this repo ("Run this after adding or
-changing commands"), so a build whose options have changed routinely runs
-against a stale one. An option's declared bound is therefore the first line and
+and the bot refreshes it on its first ready event. Clients can still send a
+stale option while the new definition propagates. An option's declared bound is the first line and
 not the only one: every option is bounded once in the declaration Discord
 enforces, and once here, on the value that actually arrived.
 
@@ -133,9 +132,9 @@ def target_refusal(
       Discord for every member from then on.
 
     A target that states no guild is accepted rather than guessed at, and the id
-    check above still applies to it. discord.User is the real case: a member
-    option falls back to one when the member is not cached, and a User carries
-    no guild to compare, so there is nothing to disagree with.
+    check above still applies to it. discord.User is the real case for an
+    interaction's invoker fallback. An explicitly declared Member option is
+    checked by discord.py's MemberTransformer before its callback runs.
     """
     scope = guild_scope(interaction)
     if scope is None:

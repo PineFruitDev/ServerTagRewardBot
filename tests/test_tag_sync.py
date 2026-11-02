@@ -14,6 +14,7 @@ from src.services.guild_config import GuildConfig
 from src.services.store_client import StoreUnavailable
 from src.services.streaks import StreakStore
 from src.services.tag_sync import TagSyncService, snowflake
+from tests.integration_harness import config_for_tests
 
 
 def user(uid="42", guild="1", enabled=True):
@@ -38,7 +39,9 @@ def sync(monkeypatch):
     streaks = SimpleNamespace(mark_many=AsyncMock())
     monkeypatch.setattr(GuildConfig, "_instance", config)
     monkeypatch.setattr(StreakStore, "_instance", streaks)
-    monkeypatch.setattr(Environment, "_config", SimpleNamespace(sync_delay_ms=350))
+    # Rate limits off: this file is about tag detection and reconciliation, and
+    # several of its cases replay one event. test_cooldowns.py turns them on.
+    monkeypatch.setattr(Environment, "_config", config_for_tests(sync_delay_ms=350))
     service = TagSyncService(client)
     return SimpleNamespace(service=service, http=http, config=config, streaks=streaks)
 
