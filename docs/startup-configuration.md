@@ -10,7 +10,7 @@ Required settings:
 
 Optional settings keep their existing defaults when unset or blank:
 
-- `ENVIRONMENT`: development or production, case insensitive; default production. Unknown modes now fail startup instead of warning and continuing.
+- `ENVIRONMENT`: development or production, case insensitive; default production. Other deployment labels warn without echoing the value and retain production logging, as before.
 - `SYNC_ON_START` and `MEMBERS_INTENT`: true/false, yes/no, on/off, or 1/0, case insensitive; default false and true respectively.
 - `SYNC_DELAY_MS`: nonnegative whole milliseconds, default 350. Large accepted delays warn by key without showing the value.
 - `COMMAND_COOLDOWN_SECONDS`, `GUILD_COMMAND_LIMIT`, `GUILD_COMMAND_WINDOW_SECONDS`, and `REWARD_COOLDOWN_SECONDS`: nonnegative whole integers, default 5, 20, 60, and 30 respectively. Zero retains its existing disable behavior.
@@ -18,4 +18,4 @@ Optional settings keep their existing defaults when unset or blank:
 
 All integer settings accept ASCII decimal digits through 2147483647. This bound prevents conversion and downstream timer arithmetic failures. Surrounding whitespace is trimmed. Malformed URL parser inputs and invalid integer encodings produce named configuration errors rather than raw parser exceptions. Successful startup messages also use key names without echoing values, hostnames, credential fragments, or configured numeric limits.
 
-Deployment compatibility: unknown environment modes, embedded credential whitespace, malformed ports, URLs containing credentials/query/fragment components, Unicode numeric input, out-of-range IDs, and integer settings above the limit must be corrected before startup. Per-guild settings stored remotely are outside this process-environment validation.
+Deployment compatibility: embedded credential whitespace, malformed ports, URLs containing credentials/query/fragment components, Unicode numeric input, out-of-range IDs, and integer settings above the limit must be corrected before startup. Per-guild settings stored remotely are outside this process-environment validation.

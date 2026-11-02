@@ -41,7 +41,7 @@ OPTIONAL_VARS = {
     "REWARD_COOLDOWN_SECONDS": "30",
 }
 
-#: Accepted application modes; a misspelling is a configuration error.
+#: Recognized logging modes. Other deployment labels retain production logging.
 ENVIRONMENTS = ("development", "production")
 
 _BOOL_TRUE = ("true", "1", "yes", "on")
@@ -202,7 +202,10 @@ class Environment:
         problems = []
 
         if cls._setting("ENVIRONMENT").lower() not in ENVIRONMENTS:
-            problems.append("ENVIRONMENT must be development or production")
+            # This labels logging, not an authorization or endpoint boundary.
+            # Preserve existing deployments using labels such as staging.
+            log.warning("validate - ENVIRONMENT is not development or production; "
+                        "using production logging")
 
         for name in _BOOL_VARS:
             if cls._setting(name).lower() not in _BOOL_TRUE + _BOOL_FALSE:

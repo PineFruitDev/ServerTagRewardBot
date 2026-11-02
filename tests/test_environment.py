@@ -173,11 +173,13 @@ def test_startup_logs_confirm_credentials_without_echoing_them(valid_env, caplog
 
 
 @pytest.mark.parametrize("value", ["prod", "dev", "staging", "private-canary"])
-def test_an_unknown_environment_fails_by_name(valid_env, monkeypatch, value, caplog):
+def test_an_unknown_environment_warns_without_blocking_startup(valid_env, monkeypatch, value, caplog):
     monkeypatch.setenv("ENVIRONMENT", value)
-    with pytest.raises(SystemExit, match="ENVIRONMENT") as failure:
+    with caplog.at_level("WARNING"):
         Environment.validate()
-    assert re.search(r"\b" + re.escape(value) + r"\b", str(failure.value) + caplog.text) is None
+    assert "using production logging" in caplog.text
+    assert re.search(r"\b" + re.escape(value) + r"\b", caplog.text) is None
+    assert Environment.get_config().is_development is False
 
 
 def test_environment_case_and_surrounding_whitespace_are_normalized(valid_env, monkeypatch):
