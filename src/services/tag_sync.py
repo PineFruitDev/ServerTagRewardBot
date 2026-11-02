@@ -17,8 +17,9 @@ from typing import Any
 import discord
 
 from src.core.options import snowflake
+from src.services import discord_retry
 from src.services.cooldowns import Cooldowns
-from src.services.discord_errors import blocks_whole_guild, describe
+from src.services.discord_errors import API_FAILURES, blocks_whole_guild, describe
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.logger import get_logger
@@ -33,10 +34,21 @@ SYNC_PAUSED_MESSAGE = (
     "Your settings and streaks are safe; roles will catch up once sync resumes."
 )
 
+# Role writes that may exhaust their retries in a row before a full sync gives
+# up. Each write is already retried, so proving a guild-wide problem one member
+# at a time now costs several calls per member: during an outage or a sustained
+# rate limit that is the most load the bot can put on an API that is already
+# struggling. A handful in a row is an outage, not unlucky members, and
+# blocks_whole_guild cannot see it because each failure is individually
+# transient. Stopping banks the work done and reports honestly; the live
+# gateway path is unaffected and the next sync picks the stragglers up.
+_MAX_CONSECUTIVE_ROLE_FAILURES = 5
+
 # snowflake() is re-exported: it is imported from here by the gateway path's
 # own tests, and it now backs the command option checks in src/core/options.py
 # too, so the rule has one definition rather than one per caller.
 __all__ = ["GuildStats", "SYNC_PAUSED_MESSAGE", "TagSyncService", "snowflake"]
+
 
 
 @dataclass
@@ -56,6 +68,11 @@ class GuildStats:
     #: discord_errors.blocks_whole_guild). A full sync stops on it instead of
     #: repeating a doomed call per member, and commands report it.
     role_blocked: str | None = field(default=None)
+    #: How many role writes in a row exhausted their retries, when that was
+    #: enough to stop a sync. Unlike role_blocked this covers causes that may
+    #: pass on their own, so the report tells the admin to try again rather
+    #: than to go change permissions.
+    stalled_after: int | None = field(default=None)
 
 
 class TagSyncService:
@@ -219,15 +236,29 @@ class TagSyncService:
 
         stats = self.stats_for(guild_id)
         try:
+            # One grant per decision, however many HTTP attempts it took. The
+            # retry happens entirely inside the await, so the counter and the
+            # log line below it are reached exactly once on success and not at
+            # all on failure. Both calls are also idempotent at Discord's end
+            # (role add is a PUT, removal a DELETE), so an attempt that landed
+            # before the error reached us is not applied twice by the retry.
             if should_have and has_role is not True:
-                await self._client.http.add_role(int(guild_ref), int(user_ref), int(role_ref))
+                await discord_retry.call(
+                    "add_role",
+                    lambda: self._client.http.add_role(int(guild_ref), int(user_ref), int(role_ref)),
+                    context=guild_id,
+                )
                 stats.roles_added += 1
                 log.info("apply_role - [%s] Added role to %s", guild_id, user_id)
             elif not should_have and has_role is not False:
-                await self._client.http.remove_role(int(guild_ref), int(user_ref), int(role_ref))
+                await discord_retry.call(
+                    "remove_role",
+                    lambda: self._client.http.remove_role(int(guild_ref), int(user_ref), int(role_ref)),
+                    context=guild_id,
+                )
                 stats.roles_removed += 1
                 log.info("apply_role - [%s] Removed role from %s", guild_id, user_id)
-        except discord.HTTPException as exc:
+        except API_FAILURES as exc:
             # describe() puts the status in the message text: passing the
             # exception as a log argument would render it as "HTTPException"
             # and lose the one detail that tells these cases apart.
@@ -266,9 +297,11 @@ class TagSyncService:
             checked = repping = 0
             after = 0
             marks: list[tuple[str, bool]] = []
+            failures_in_a_row = 0
             # A fresh attempt re-tests the role: an admin may have fixed the
-            # permissions since the last run.
+            # permissions since the last run, and an outage may have passed.
             stats.role_blocked = None
+            stats.stalled_after = None
 
             while True:
                 batch = await self._fetch_members(guild_id, after)
@@ -302,8 +335,15 @@ class TagSyncService:
                     if should_have:
                         repping += 1
                     marks.append((member_id, should_have))
-                    await self.apply_role(guild_id, role_id, member_id, should_have, member.get("roles"))
+                    applied = await self.apply_role(guild_id, role_id, member_id,
+                                                    should_have, member.get("roles"))
+                    # Counted per member, not per attempt: apply_role has
+                    # already spent its own bounded retries by this point.
+                    failures_in_a_row = 0 if applied else failures_in_a_row + 1
                     if stats.role_blocked is not None:
+                        break
+                    if failures_in_a_row >= _MAX_CONSECUTIVE_ROLE_FAILURES:
+                        stats.stalled_after = failures_in_a_row
                         break
 
                 # Batched: one store request per 50 members instead of one each
@@ -316,6 +356,13 @@ class TagSyncService:
                     # done so far is kept and reported.
                     log.error("full_sync - [%s] Stopped after %d members: role is unmanageable (%s)",
                               guild_id, checked, stats.role_blocked)
+                    break
+
+                if stats.stalled_after is not None:
+                    log.error("full_sync - [%s] Stopped after %d members: %d role updates failed in "
+                              "a row. Retries are already spent per member, so this is an outage or "
+                              "a sustained rate limit rather than unlucky members.",
+                              guild_id, checked, stats.stalled_after)
                     break
 
                 if len(batch) < 1000:
@@ -341,10 +388,17 @@ class TagSyncService:
         caller turns the failure into a specific reply. Logged here because the
         status code is the only thing separating a withdrawn members intent
         from a transient outage, and describe() is the only way to keep it.
+
+        Retried on a rate limit or a 5xx first: losing a page here abandons the
+        rest of the guild, which is the most expensive failure in the service.
         """
         try:
-            return await self._client.http.get_members(int(guild_id), limit=1000, after=after)
-        except discord.HTTPException as exc:
+            return await discord_retry.call(
+                "get_members",
+                lambda: self._client.http.get_members(int(guild_id), limit=1000, after=after),
+                context=guild_id,
+            )
+        except API_FAILURES as exc:
             log.error("full_sync - [%s] Member list request failed (%s)", guild_id, describe(exc))
             raise
 
@@ -353,8 +407,12 @@ class TagSyncService:
         try:
             # Annotated User by the stubs, but the HTTP layer returns the raw
             # payload, so it is shape checked below rather than trusted.
-            fetched: Any = await self._client.http.get_user(int(member_id))
-        except discord.HTTPException as exc:
+            fetched: Any = await discord_retry.call(
+                "get_user",
+                lambda: self._client.http.get_user(int(member_id)),
+                context=guild_id,
+            )
+        except API_FAILURES as exc:
             log.warning("full_sync - [%s] Could not refetch member %s (%s)",
                         guild_id, member_id, describe(exc))
             return None

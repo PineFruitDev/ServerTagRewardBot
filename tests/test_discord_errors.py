@@ -10,11 +10,13 @@ import discord
 import pytest
 
 from src.services.discord_errors import (
+    API_FAILURES,
     MISSING_PERMISSIONS,
     UNKNOWN_ROLE,
     blocks_whole_guild,
     describe,
     is_transient,
+    retry_after,
     user_message,
 )
 
@@ -87,3 +89,73 @@ def test_user_message_is_actionable_for_the_case(status, code, fragment):
 def test_user_message_never_forwards_discord_prose_to_the_user():
     exc = http_error(400, 50035, message="Invalid Form Body: secret-internal-detail")
     assert "secret-internal-detail" not in user_message(exc)
+
+
+# --- RateLimited, which is not an HTTPException ------------------------------
+#
+# discord.py raises it instead of sleeping when a wait exceeds the client's
+# max_ratelimit_timeout, and Ratelimit.acquire can raise it before the request
+# is even sent. Every helper here has to accept it, because `except
+# HTTPException` does not.
+
+
+def test_rate_limited_is_not_an_http_exception():
+    """The whole reason API_FAILURES exists. If this ever changes, simplify."""
+    assert not issubclass(discord.RateLimited, discord.HTTPException)
+    assert discord.RateLimited in API_FAILURES
+
+
+def test_describe_reports_the_wait_a_rate_limit_asked_for():
+    assert describe(discord.RateLimited(12.5)) == "rate limited, 12.5s requested"
+
+
+def test_a_rate_limit_is_always_worth_retrying():
+    assert is_transient(discord.RateLimited(1.0)) is True
+
+
+def test_a_rate_limit_never_stops_a_whole_sync():
+    """Unlike a 403, it passes on its own, so the remaining members are fine."""
+    assert blocks_whole_guild(discord.RateLimited(1.0)) is False
+
+
+def test_a_rate_limit_reads_the_same_to_the_admin_either_way():
+    assert user_message(discord.RateLimited(1.0)) == user_message(http_error(429))
+
+
+# --- how long to wait -------------------------------------------------------
+
+
+def test_retry_after_is_taken_from_a_rate_limit_directly():
+    assert retry_after(discord.RateLimited(8.0)) == 8.0
+
+
+def test_a_negative_rate_limit_wait_is_clamped():
+    assert retry_after(discord.RateLimited(-5.0)) == 0.0
+
+
+def test_retry_after_is_read_from_the_response_header():
+    """The library gave up on this 429, but its response still carries the header."""
+    exc = discord.HTTPException(
+        SimpleNamespace(status=429, reason="reason", headers={"Retry-After": "3.5"}), "nope")
+    assert retry_after(exc) == 3.5
+
+
+@pytest.mark.parametrize("headers", [{}, {"Retry-After": ""}, {"Retry-After": "soon"}])
+def test_no_usable_header_means_no_answer_rather_than_zero(headers):
+    """None leaves the caller to back off; 0.0 would retry straight into the limit."""
+    exc = discord.HTTPException(
+        SimpleNamespace(status=429, reason="reason", headers=headers), "nope")
+    assert retry_after(exc) is None
+
+
+def test_a_response_with_no_headers_at_all_is_tolerated():
+    """HTTPException only promises `.status`; the backend supplies the rest."""
+    assert retry_after(http_error(503)) is None
+
+
+@pytest.mark.parametrize("headers", ["Retry-After: 5", 5, object()])
+def test_headers_that_are_not_a_mapping_are_tolerated(headers):
+    """Deciding how long to wait must not itself raise on an odd response."""
+    exc = discord.HTTPException(
+        SimpleNamespace(status=429, reason="reason", headers=headers), "nope")
+    assert retry_after(exc) is None
