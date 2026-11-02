@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
+from src.core.options import require_guild_scope
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 
@@ -22,12 +23,15 @@ class StatusCommand(Command):
     def register(self, tree: app_commands.CommandTree) -> None:
         @tree.command(name="status", description="Show tag reward sync status for this server")
         async def status(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
-                return
-            await self.execute(interaction)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self.execute(interaction)
 
     async def execute(self, interaction: discord.Interaction) -> None:
-        guild_id = str(interaction.guild_id)
+        guild_id = await require_guild_scope(interaction)
+        if guild_id is None:
+            return
         role_id = await GuildConfig.get_instance().get_role(guild_id)
 
         if role_id is None:
@@ -59,6 +63,8 @@ class StatusCommand(Command):
             .add_field(name="➕ Roles Added", value=str(stats.roles_added), inline=True)
             .add_field(name="➖ Roles Removed", value=str(stats.roles_removed), inline=True)
             .add_field(name="⚡ Live Updates Seen", value=str(stats.live_updates), inline=True)
+            .add_field(name="⏭️ Duplicate Updates Skipped",
+                       value=str(stats.duplicates_collapsed), inline=True)
             .add_field(name="🕐 Last Full Sync", value=last_sync, inline=True)
         )
         embed.timestamp = discord.utils.utcnow()

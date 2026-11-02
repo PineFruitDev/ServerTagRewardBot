@@ -15,7 +15,7 @@ import asyncio
 from collections.abc import Coroutine
 from typing import Any
 
-from src.services.logger import get_logger
+from src.services.logger import get_logger, without_user
 
 log = get_logger("Tasks")
 
@@ -30,6 +30,13 @@ def spawn(coro: Coroutine[Any, Any, Any], *, name: str) -> asyncio.Task[Any] | N
     """Run coro in the background, holding a reference until it completes.
 
     Returns None without starting anything once drain() has begun.
+
+    asyncio copies the current context into the new task, which is how work
+    started by a command keeps that command's correlation id without anything
+    being threaded through. The one field that must not come along is the user:
+    this is the boundary where work for one person becomes work across a whole
+    guild, and carrying their id would attribute every member the sync touches
+    to whoever asked for it.
     """
     if _closing:
         # Closing the coroutine keeps Python from warning that it was never
@@ -37,7 +44,8 @@ def spawn(coro: Coroutine[Any, Any, Any], *, name: str) -> asyncio.Task[Any] | N
         coro.close()
         log.warning("spawn - Declined %s: shutting down", name)
         return None
-    task = asyncio.create_task(coro, name=name)
+    with without_user():
+        task = asyncio.create_task(coro, name=name)
     _running.add(task)
     task.add_done_callback(_finish)
     return task

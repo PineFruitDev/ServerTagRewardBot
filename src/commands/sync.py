@@ -4,6 +4,7 @@ import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
+from src.core.options import require_guild_scope
 from src.services.guild_config import GuildConfig
 from src.services.tag_sync import SYNC_PAUSED_MESSAGE, TagSyncService
 
@@ -21,16 +22,26 @@ class SyncCommand(Command):
     required_user_permissions = ("manage_guild", "administrator")
     guild_only = True
 
+    # The most expensive thing the bot can be asked to do: one API call per
+    # member, plus a re-fetch for every member whose payload omits the tag.
+    # full_sync's lock already refuses an overlapping run; these stop a queue
+    # of runs forming behind the one in flight.
+    user_cooldown = 60.0
+    guild_rate = (3, 300.0)
+
     def register(self, tree: app_commands.CommandTree) -> None:
         @tree.command(name="sync", description="Run a full member sync of the tag reward role")
         @app_commands.default_permissions(manage_guild=True)
         async def sync(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
-                return
-            await self.execute(interaction)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self.execute(interaction)
 
     async def execute(self, interaction: discord.Interaction) -> None:
-        guild_id = str(interaction.guild_id)
+        guild_id = await require_guild_scope(interaction)
+        if guild_id is None:
+            return
 
         if await GuildConfig.get_instance().get_role(guild_id) is None:
             await interaction.response.send_message(

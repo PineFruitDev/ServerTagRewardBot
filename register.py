@@ -3,8 +3,6 @@
 Run this after adding or changing commands: python register.py
 """
 
-import asyncio
-
 import discord
 from dotenv import load_dotenv
 

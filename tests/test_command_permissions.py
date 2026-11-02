@@ -321,7 +321,7 @@ async def test_configure_outside_a_guild_refuses_rather_than_raising():
     interaction = FakeInteraction(dm=True)
     await SetupCommand()._configure(interaction, REWARD_ROLE)
 
-    assert "which server this is" in interaction.replied
+    assert "only be used in servers" in interaction.replied
 
 
 # --------------------------------------------------------------------------- #
@@ -355,3 +355,62 @@ async def test_setup_binds_the_prompt_to_the_admin_who_ran_it(fresh_ui):
         assert interaction.view.author_id == interaction.user.id
     finally:
         interaction.view.stop()
+
+
+@pytest.mark.parametrize("permissions", [NOBODY, None], ids=["demoted", "unreadable"])
+async def test_sync_button_rechecks_the_authors_current_permissions(fresh_ui, permissions):
+    setup = await fresh_ui.run("setup", REWARD_ROLE)
+    press = FakeInteraction(user=invoker(permissions or NOBODY))
+    press.command = None
+    press.data = {}
+    if permissions is None:
+        press.user = SimpleNamespace(id=setup.user.id)
+    try:
+        await discord.ui.View._scheduled_task(setup.view, setup.view.sync_now, press)
+        assert "get_members" not in [call[0] for call in fresh_ui.http.calls]
+        assert "Manage Server" in press.replied or "can't read your permissions" in press.replied
+        assert press.response.messages[0]["ephemeral"] is True
+        assert not setup.view.sync_now.disabled
+    finally:
+        setup.view.stop()
+
+
+async def test_demoted_author_can_still_dismiss_the_prompt(fresh_ui):
+    setup = await fresh_ui.run("setup", REWARD_ROLE)
+    press = FakeInteraction(user=invoker(NOBODY))
+    press.command = None
+    press.data = {}
+    try:
+        await discord.ui.View._scheduled_task(setup.view, setup.view.later, press)
+        assert "No problem" in press.response.edits[0]["content"]
+        assert "get_members" not in [call[0] for call in fresh_ui.http.calls]
+    finally:
+        setup.view.stop()
+
+
+async def test_sync_button_shares_the_slash_commands_cooldown(fresh_ui):
+    setup = await fresh_ui.run("setup", REWARD_ROLE)
+    await fresh_ui.run("sync")
+    before = list(fresh_ui.http.calls)
+    press = FakeInteraction()
+    press.command, press.data = None, {}
+    try:
+        await discord.ui.View._scheduled_task(setup.view, setup.view.sync_now, press)
+        assert "again in" in press.replied
+        assert fresh_ui.http.calls == before
+        assert not setup.view.sync_now.disabled
+    finally:
+        setup.view.stop()
+
+
+async def test_denied_button_does_not_spend_the_sync_cooldown(fresh_ui):
+    setup = await fresh_ui.run("setup", REWARD_ROLE)
+    press = FakeInteraction(user=invoker(NOBODY))
+    press.command, press.data = None, {}
+    try:
+        await discord.ui.View._scheduled_task(setup.view, setup.view.sync_now, press)
+        allowed = FakeInteraction()
+        assert await SyncCommand().guard(allowed)
+        assert allowed.response.messages == []
+    finally:
+        setup.view.stop()

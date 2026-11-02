@@ -10,13 +10,14 @@ the field changes, so role updates land within seconds across every guild.
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import discord
 
+from src.core.options import snowflake
+from src.services.cooldowns import Cooldowns
 from src.services.discord_errors import blocks_whole_guild, describe
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
@@ -32,22 +33,10 @@ SYNC_PAUSED_MESSAGE = (
     "Your settings and streaks are safe; roles will catch up once sync resumes."
 )
 
-_SNOWFLAKE = re.compile(r"^\d{1,20}$")
-
-
-def snowflake(value: object) -> str | None:
-    """Return value as a Discord id string, or None when it is not one.
-
-    Gateway payloads are parsed straight from JSON, so every id has to be shape
-    checked before it reaches int() or the store.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return str(value) if value >= 0 else None
-    if isinstance(value, str) and _SNOWFLAKE.match(value):
-        return value
-    return None
+# snowflake() is re-exported: it is imported from here by the gateway path's
+# own tests, and it now backs the command option checks in src/core/options.py
+# too, so the rule has one definition rather than one per caller.
+__all__ = ["GuildStats", "SYNC_PAUSED_MESSAGE", "TagSyncService", "snowflake"]
 
 
 @dataclass
@@ -59,6 +48,9 @@ class GuildStats:
     roles_removed: int = 0
     currently_repping: int = 0
     live_updates: int = 0
+    #: Member updates that carried a tag state the bot had already applied, so
+    #: they cost no role write and no store round trip (see cooldowns.py).
+    duplicates_collapsed: int = 0
     last_sync_at: datetime | None = field(default=None)
     #: Set when a role write failed in a way that affects the whole guild (see
     #: discord_errors.blocks_whole_guild). A full sync stops on it instead of
@@ -155,22 +147,51 @@ class TagSyncService:
         repping = self.is_repping(user, guild_id)
         if event == "GUILD_MEMBER_UPDATE":
             self.stats_for(guild_id).live_updates += 1
-            await self.apply_role(guild_id, role_id, user_id, repping, data.get("roles"))
-            await self._record_streaks(guild_id, [(user_id, repping)])
-        elif repping:
-            await self.apply_role(guild_id, role_id, user_id, True, data.get("roles"))
-            await self._record_streaks(guild_id, [(user_id, True)])
+        elif not repping:
+            # A member joining without this guild's tag has nothing to grant,
+            # and nothing to remove either: they arrive with no roles.
+            return
+
+        await self._apply_live(guild_id, role_id, user_id, repping, data.get("roles"))
+
+    async def _apply_live(self, guild_id: str, role_id: str, user_id: str,
+                          repping: bool, current_roles=None) -> None:
+        """Act on one gateway event, unless the event has nothing left to say.
+
+        GUILD_MEMBER_UPDATE fires for every member edit, so most of these
+        events repeat a tag state the bot acted on seconds ago, and each one
+        otherwise costs a store round trip to re-record a streak that has not
+        moved. Collapsing them is what keeps a nickname spree cheap.
+
+        Two things have to hold before an event is dropped: the decision has
+        to repeat one already applied, and the roles the event itself carries
+        have to agree with it. The second is what makes this safe. An admin who
+        pulls the reward role by hand produces an event whose roles disagree,
+        and that event is acted on rather than mistaken for noise.
+        """
+        settled = (role_id in current_roles) == repping if isinstance(current_roles, list) else False
+        if settled and Cooldowns.get_instance().collapse_duplicate(guild_id, user_id, repping):
+            self.stats_for(guild_id).duplicates_collapsed += 1
+            return
+
+        cooldowns = Cooldowns.get_instance()
+        role_ok = await self.apply_role(guild_id, role_id, user_id, repping, current_roles)
+        stored = await self._record_streaks(guild_id, [(user_id, repping)])
+        if role_ok and stored:
+            cooldowns.record_reward(guild_id, user_id, repping)
 
     @staticmethod
-    async def _record_streaks(guild_id: str, marks: list[tuple[str, bool]]) -> None:
+    async def _record_streaks(guild_id: str, marks: list[tuple[str, bool]]) -> bool:
         """Update streaks; a store outage is logged but never blocks role updates."""
         if not marks:
-            return
+            return True
         try:
             await StreakStore.get_instance().mark_many(guild_id, marks)
         except StoreError as exc:
             log.warning("_record_streaks - [%s] Could not record %d streak update(s): %s",
                         guild_id, len(marks), exc)
+            return False
+        return True
 
     async def apply_role(self, guild_id: str, role_id: str, user_id: str,
                          should_have: bool, current_roles=None) -> bool:
@@ -189,6 +210,9 @@ class TagSyncService:
                       guild_id, user_id, role_id)
             return False
 
+        # A fresh role reconciliation (including full sync) invalidates the
+        # previous completed event before any I/O can fail.
+        Cooldowns.get_instance().forget_reward(guild_ref, user_ref)
         has_role = None
         if isinstance(current_roles, list):
             has_role = role_id in current_roles
@@ -216,6 +240,7 @@ class TagSyncService:
                 log.warning("apply_role - [%s] Role update failed for %s (%s)",
                             guild_id, user_id, detail)
             return False
+
         return True
 
     async def full_sync(self, guild_id: str) -> GuildStats:

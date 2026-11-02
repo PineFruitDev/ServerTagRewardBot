@@ -45,9 +45,9 @@ def build_bot(config: Config, members: bool) -> Bot:
         log.info("on_ready - Logged in as %s across %d guilds, mode: %s", bot.user, len(bot.guilds), mode)
         # Hosted mode: make sure slash commands are registered, then reconcile
         async with commands_sync_lock:
-            if not getattr(bot, "_commands_synced", False):
+            if not bot.commands_synced:
                 await bot.sync_commands()
-                bot._commands_synced = True
+                bot.commands_synced = True
         try:
             log.info("on_ready - Store reachable, %d guilds configured", await GuildConfig.get_instance().count())
         except StoreError as exc:
