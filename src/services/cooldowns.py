@@ -256,10 +256,15 @@ class Cooldowns:
         key = self._reward_key(guild_id, user_id, repping)
         return self._limiter.check(key, 1, self.policy.reward_seconds, record=False) > 0
 
+    def forget_reward(self, guild_id: str, user_id: str) -> None:
+        """Invalidate a prior decision before processing a fresh event."""
+        for repping in (False, True):
+            self._limiter.forget(self._reward_key(guild_id, user_id, repping))
+
     def record_reward(self, guild_id: str, user_id: str, repping: bool) -> None:
         """Remember a decision the bot applied, so its duplicates can be collapsed.
 
-        Only ever called after a successful role write. A refused or failed
+        Only called after successful role reconciliation and streak persistence. A refused or failed
         write leaves nothing recorded, so the next event that carries the same
         state retries it instead of mistaking the failure for settled state.
         """

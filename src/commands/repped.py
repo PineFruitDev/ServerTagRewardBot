@@ -23,14 +23,16 @@ class ReppedCommand(Command):
         @tree.command(name="repped", description="See how long you (or someone else) have been repping the server tag")
         @app_commands.describe(user="Whose streak to check (defaults to you)")
         async def repped(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
-            if not await self.guard(interaction):
-                return
-            await self._show(interaction, user or interaction.user)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self._show(interaction, user or interaction.user)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         await self._show(interaction, interaction.user)
 
-    async def _show(self, interaction: discord.Interaction, member: discord.Member) -> None:
+    async def _show(self, interaction: discord.Interaction,
+                    member: discord.Member | discord.User) -> None:
         guild_id = str(interaction.guild_id)
 
         if await GuildConfig.get_instance().get_role(guild_id) is None:

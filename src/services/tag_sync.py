@@ -181,24 +181,29 @@ class TagSyncService:
         pulls the reward role by hand produces an event whose roles disagree,
         and that event is acted on rather than mistaken for noise.
         """
-        settled = (role_id in current_roles) == repping if isinstance(current_roles, list) else True
+        settled = (role_id in current_roles) == repping if isinstance(current_roles, list) else False
         if settled and Cooldowns.get_instance().collapse_duplicate(guild_id, user_id, repping):
             self.stats_for(guild_id).duplicates_collapsed += 1
             return
 
-        await self.apply_role(guild_id, role_id, user_id, repping, current_roles)
-        await self._record_streaks(guild_id, [(user_id, repping)])
+        cooldowns = Cooldowns.get_instance()
+        role_ok = await self.apply_role(guild_id, role_id, user_id, repping, current_roles)
+        stored = await self._record_streaks(guild_id, [(user_id, repping)])
+        if role_ok and stored:
+            cooldowns.record_reward(guild_id, user_id, repping)
 
     @staticmethod
-    async def _record_streaks(guild_id: str, marks: list[tuple[str, bool]]) -> None:
+    async def _record_streaks(guild_id: str, marks: list[tuple[str, bool]]) -> bool:
         """Update streaks; a store outage is logged but never blocks role updates."""
         if not marks:
-            return
+            return True
         try:
             await StreakStore.get_instance().mark_many(guild_id, marks)
         except StoreError as exc:
             log.warning("_record_streaks - [%s] Could not record %d streak update(s): %s",
                         guild_id, len(marks), exc)
+            return False
+        return True
 
     async def apply_role(self, guild_id: str, role_id: str, user_id: str,
                          should_have: bool, current_roles=None) -> bool:
@@ -217,6 +222,9 @@ class TagSyncService:
                       guild_id, user_id, role_id)
             return False
 
+        # A fresh role reconciliation (including full sync) invalidates the
+        # previous completed event before any I/O can fail.
+        Cooldowns.get_instance().forget_reward(guild_ref, user_ref)
         has_role = None
         if isinstance(current_roles, list):
             has_role = role_id in current_roles
@@ -245,10 +253,6 @@ class TagSyncService:
                             guild_id, user_id, detail)
             return False
 
-        # Record what is now in effect, so the duplicate member updates that
-        # follow cost nothing. Only reached on success: a failed write must
-        # leave the next event free to retry it.
-        Cooldowns.get_instance().record_reward(guild_ref, user_ref, should_have)
         return True
 
     async def full_sync(self, guild_id: str) -> GuildStats:

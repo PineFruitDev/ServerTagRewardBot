@@ -416,3 +416,65 @@ async def test_status_reports_what_collapsing_saved(ui, ticking):
 def test_a_wait_falls_back_to_the_server_wording_for_an_unknown_scope():
     """message() is reached from one place, but must never render a scope name."""
     assert "`/ping`" in Wait(1.0, "something-else").message("ping")
+
+
+async def test_failed_reversal_does_not_suppress_the_next_tag_transition(bot, ticking):
+    limits(ticking, reward_seconds=300)
+    await bot.equip(ALICE)
+    bot.http.failures.add(("remove_role", ALICE))
+    await bot.unequip(ALICE, roles=[ROLE])
+    bot.http.failures.clear()
+    await bot.equip(ALICE, roles=[ROLE])
+    assert len(bot.store.mark_requests) == 3
+    assert bot.stats().duplicates_collapsed == 0
+
+
+async def test_failed_streak_write_is_retried_by_a_matching_event(bot, ticking, monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.services.streaks import StreakStore
+    from src.services.store_client import StoreError
+
+    limits(ticking, reward_seconds=300)
+    mark = AsyncMock(side_effect=[StoreError("synthetic outage"), None, None])
+    monkeypatch.setattr(StreakStore.get_instance(), "mark_many", mark)
+    await bot.equip(ALICE)
+    await bot.equip(ALICE, roles=[ROLE])
+    await bot.equip(ALICE, roles=[ROLE])
+    assert mark.await_count == 2
+    assert bot.stats().duplicates_collapsed == 1
+
+
+async def test_unknown_role_state_is_not_collapsed(bot, ticking):
+    limits(ticking, reward_seconds=300)
+    await bot.equip(ALICE)
+    await bot.service._apply_live(GUILD, ROLE, ALICE, True, None)
+    assert len(bot.http.ops()) == 2
+    assert bot.stats().duplicates_collapsed == 0
+
+
+async def test_full_sync_invalidates_live_cache_before_a_failed_streak_batch(bot, ticking, monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.services.store_client import StoreError
+    from tests.integration_harness import member_payload
+
+    cooldowns = limits(ticking, reward_seconds=300)
+    await bot.equip(ALICE)
+    bot.http.seed_members(GUILD, [member_payload(ALICE, None, roles=[ROLE])])
+    with monkeypatch.context() as patch:
+        patch.setattr(bot.streaks, "mark_many", AsyncMock(side_effect=StoreError("synthetic outage")))
+        await bot.service.full_sync(GUILD)
+    assert not cooldowns.collapse_duplicate(GUILD, ALICE, True)
+    await bot.equip(ALICE, roles=[ROLE])
+    assert len(bot.store.mark_requests) == 2
+    assert bot.stats().duplicates_collapsed == 0
+
+
+async def test_rate_limit_denials_keep_the_command_observation_contract(ui, ticking):
+    from tests.integration_harness import captured_logs
+
+    limits(ticking, user_seconds=5)
+    await ui.run("status")
+    with captured_logs() as logs:
+        pressed = await ui.run("status")
+    assert logs.one("Commands", "/status finished")["outcome"] == "denied"
+    assert pressed.user.display_name not in logs.raw

@@ -2,11 +2,14 @@
 
 Each command extends Command, describes itself with CommandHelpInfo, and
 registers its own slash command against the tree. Validation (guild-only,
-permissions, developer-only) and rate limiting are shared here so commands
-stay tiny.
+permissions, developer-only) and rate limiting are shared here so commands stay tiny, and so is
+observation: every registered callback opens with `async with
+self.observed(interaction)` so its log lines are correlated and its outcome
+and latency are recorded without each command repeating that.
 """
 
 from abc import ABC, abstractmethod
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 
 import discord
@@ -15,6 +18,7 @@ from discord import app_commands
 from src.services.cooldowns import Cooldowns, Wait
 from src.services.environment import Environment
 from src.services.logger import get_logger
+from src.services.observability import DENIED, CommandRun, mark, observed
 
 log = get_logger("Command")
 
@@ -83,6 +87,16 @@ class Command(ABC):
     def register(self, tree: app_commands.CommandTree) -> None:
         """Attach this command's callback(s) to the command tree."""
 
+    def observed(self, interaction: discord.Interaction,
+                 command: str | None = None) -> AbstractAsyncContextManager[CommandRun]:
+        """Correlate and time one invocation. Wrap every registered callback.
+
+        Pass `command` for a callback whose slash command is not named after
+        this Command, which is how /disable is told apart from the /setup it
+        is registered alongside.
+        """
+        return observed(interaction, command or self.name)
+
     async def validate(self, interaction: discord.Interaction) -> tuple[bool, str | None]:
         """Check whether the command can run in the current context."""
         if self.guild_only and interaction.guild is None:
@@ -125,7 +139,11 @@ class Command(ABC):
         name = name or self.name
         valid, reason = await self.validate(interaction)
         if not valid:
-            log.warning("guard - /%s blocked for %s: %s", name, interaction.user, reason)
+            # The reason is one of this module's own fixed strings, and who was
+            # refused is already on the line as the user field, so nothing
+            # user-controlled (a display name least of all) goes in here.
+            mark(DENIED)
+            log.warning("guard - /%s refused: %s", name, reason)
             await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
             return False
 
@@ -133,8 +151,9 @@ class Command(ABC):
         # does not spend the member's cooldown or the server's budget.
         waiting = self.cooldown(interaction, name)
         if waiting is not None:
-            log.info("guard - /%s rate limited for %s (%s scope, %.1fs left)",
-                     name, interaction.user, waiting.scope, waiting.seconds)
+            mark(DENIED)
+            log.info("guard - /%s rate limited (%s scope, %.1fs left)",
+                     name, waiting.scope, waiting.seconds)
             await interaction.response.send_message(waiting.message(name), ephemeral=True)
             return False
 

@@ -22,9 +22,10 @@ class StatusCommand(Command):
     def register(self, tree: app_commands.CommandTree) -> None:
         @tree.command(name="status", description="Show tag reward sync status for this server")
         async def status(interaction: discord.Interaction) -> None:
-            if not await self.guard(interaction):
-                return
-            await self.execute(interaction)
+            async with self.observed(interaction):
+                if not await self.guard(interaction):
+                    return
+                await self.execute(interaction)
 
     async def execute(self, interaction: discord.Interaction) -> None:
         guild_id = str(interaction.guild_id)
