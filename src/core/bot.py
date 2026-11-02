@@ -7,7 +7,6 @@ from src.core.command import Command
 from src.core.command_manager import CommandManager
 from src.services import discord_retry
 from src.services.command_errors import report
-
 from src.services.logger import get_logger
 from src.services.store_client import StoreClient, StoreError
 
@@ -72,4 +71,3 @@ class Bot(discord.Client):
         """
         name = getattr(interaction.command, "name", "?")
         await report(interaction, error, subject=f"/{name}")
-

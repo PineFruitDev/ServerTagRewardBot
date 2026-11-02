@@ -10,13 +10,13 @@ the field changes, so role updates land within seconds across every guild.
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 import discord
 
+from src.core.options import snowflake
 from src.services import discord_retry
 from src.services.cooldowns import Cooldowns
 from src.services.discord_errors import API_FAILURES, blocks_whole_guild, describe
@@ -34,8 +34,6 @@ SYNC_PAUSED_MESSAGE = (
     "Your settings and streaks are safe; roles will catch up once sync resumes."
 )
 
-_SNOWFLAKE = re.compile(r"^\d{1,20}$")
-
 # Role writes that may exhaust their retries in a row before a full sync gives
 # up. Each write is already retried, so proving a guild-wide problem one member
 # at a time now costs several calls per member: during an outage or a sustained
@@ -46,20 +44,11 @@ _SNOWFLAKE = re.compile(r"^\d{1,20}$")
 # gateway path is unaffected and the next sync picks the stragglers up.
 _MAX_CONSECUTIVE_ROLE_FAILURES = 5
 
+# snowflake() is re-exported: it is imported from here by the gateway path's
+# own tests, and it now backs the command option checks in src/core/options.py
+# too, so the rule has one definition rather than one per caller.
+__all__ = ["GuildStats", "SYNC_PAUSED_MESSAGE", "TagSyncService", "snowflake"]
 
-def snowflake(value: object) -> str | None:
-    """Return value as a Discord id string, or None when it is not one.
-
-    Gateway payloads are parsed straight from JSON, so every id has to be shape
-    checked before it reaches int() or the store.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return str(value) if value >= 0 else None
-    if isinstance(value, str) and _SNOWFLAKE.match(value):
-        return value
-    return None
 
 
 @dataclass

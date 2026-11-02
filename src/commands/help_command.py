@@ -7,18 +7,17 @@ import discord
 from discord import app_commands
 
 from src.core.command import Command, CommandHelpInfo
-
-# Discord accepts up to 6000 characters in a string option but caps a message
-# body at 2000, so anything echoed back has to be clamped well short of that.
-_MAX_ECHO = 60
+from src.core.options import safe_echo
 
 
 def sanitize_name(raw: str) -> str:
-    """Make a user-supplied command name safe to quote back at them."""
-    collapsed = " ".join(raw.split())
-    if len(collapsed) > _MAX_ECHO:
-        collapsed = collapsed[:_MAX_ECHO] + "…"
-    return discord.utils.escape_markdown(collapsed) if collapsed else "(blank)"
+    """Make a user-supplied command name safe to quote back at them.
+
+    The clamping and escaping moved to src/core/options.py: the Range this
+    option declares is not enforced at runtime, and every option echoed back
+    into a reply needs the same treatment rather than just this one.
+    """
+    return safe_echo(raw)
 
 
 class HelpCommand(Command):
