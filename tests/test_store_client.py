@@ -167,7 +167,7 @@ async def test_retryable_statuses_use_bounded_exponential_backoff(monkeypatch, s
 
     sleep = AsyncMock()
     monkeypatch.setattr("src.services.store_client.asyncio.sleep", sleep)
-    monkeypatch.setattr("src.services.store_client.random.random", lambda: 0.5)
+    monkeypatch.setattr("src.services.backoff.random.random", lambda: 0.5)
     calls = 0
 
     async def handler(request):
@@ -196,7 +196,7 @@ async def _retry_after_run(header, monkeypatch, status=429, attempts=2):
 
     sleep = AsyncMock()
     monkeypatch.setattr("src.services.store_client.asyncio.sleep", sleep)
-    monkeypatch.setattr("src.services.store_client.random.random", lambda: 0.5)
+    monkeypatch.setattr("src.services.backoff.random.random", lambda: 0.5)
     calls = 0
 
     async def handler(request):
@@ -268,7 +268,7 @@ async def test_retry_after_http_date_without_a_zone_is_read_as_utc(monkeypatch):
 
 async def test_retry_after_date_the_parser_cannot_place_falls_back_to_backoff(monkeypatch):
     """A date parser that returns nothing instead of raising is still a no-answer."""
-    monkeypatch.setattr("src.services.store_client.parsedate_to_datetime", lambda raw: None)
+    monkeypatch.setattr("src.services.backoff.parsedate_to_datetime", lambda raw: None)
     sleep, client, server = await _retry_after_run("Tue, 01 Dec 2026 00:00:00 GMT", monkeypatch)
     try:
         assert await client.get("/health") == {"ok": True}
@@ -308,7 +308,7 @@ async def test_retry_after_only_governs_the_response_that_sent_it(monkeypatch):
 
     sleep = AsyncMock()
     monkeypatch.setattr("src.services.store_client.asyncio.sleep", sleep)
-    monkeypatch.setattr("src.services.store_client.random.random", lambda: 0.5)
+    monkeypatch.setattr("src.services.backoff.random.random", lambda: 0.5)
     calls = 0
 
     async def handler(request):

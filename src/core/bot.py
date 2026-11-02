@@ -5,6 +5,7 @@ from discord import app_commands
 
 from src.core.command import Command
 from src.core.command_manager import CommandManager
+from src.services import discord_retry
 from src.services.command_errors import report
 from src.services.logger import get_logger
 from src.services.store_client import StoreClient, StoreError
@@ -27,6 +28,7 @@ class Bot(discord.Client):
     """Discord client wired to the centralized command registry."""
 
     def __init__(self, commands: list[Command], intents: discord.Intents | None = None, **client_options):
+        client_options.setdefault("max_ratelimit_timeout", discord_retry.MAX_RATELIMIT_TIMEOUT)
         super().__init__(intents=intents or discord.Intents.default(), **client_options)
         self.tree = CommandTree(self)
         self.command_manager = CommandManager(commands)
@@ -41,8 +43,14 @@ class Bot(discord.Client):
         log.info("on_ready - Logged in as %s", self.user)
 
     async def sync_commands(self) -> int:
-        """Push the command tree to Discord. Returns how many commands synced."""
-        synced = await self.tree.sync()
+        """Push the command tree to Discord. Returns how many commands synced.
+
+        Retried on a rate limit or an outage. Global command registration is
+        one of the tightest buckets Discord has, and startup calls it on the
+        first ready event, so an initial outage can leave commands stale. Failing
+        it without a retry leaves the bot connected but with stale commands.
+        """
+        synced = await discord_retry.call("tree.sync", self.tree.sync)
         log.info("sync_commands - Synced %d application (/) commands", len(synced))
         return len(synced)
 

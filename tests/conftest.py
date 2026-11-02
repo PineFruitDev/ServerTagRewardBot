@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.services import tasks
+from src.services import discord_retry, tasks
 from src.services.cooldowns import Cooldowns
 from src.services.environment import Environment, OPTIONAL_VARS, REQUIRED_VARS
 from src.services.guild_config import GuildConfig
@@ -35,6 +35,11 @@ def isolated_state(monkeypatch):
     # A test that drains background work must not leave spawn() closed for the
     # rest of the session.
     monkeypatch.setattr(tasks, "_closing", False)
+    # Retry the Discord REST paths without waiting between attempts. The
+    # attempts themselves stay on, so every test keeps exercising the real
+    # retry behaviour; only the wall clock is given up. tests/test_discord_retry
+    # sets a real backoff explicitly and asserts the delays against a fake sleep.
+    monkeypatch.setattr(discord_retry, "BACKOFF_SECONDS", 0.0)
 
 
 # --------------------------------------------------------------------------- #

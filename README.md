@@ -67,6 +67,11 @@ Every limit is off at `0`, and all of them are per process and in memory, which
 needs no storage and loses nothing worse than one redundant role write on a
 restart.
 
+
+Idempotent Discord role updates, member reads, and command registration retry
+transient failures within fixed attempt and wait limits. Interaction replies
+are not retried because their initial response token is single-use.
+
 ## Self-Hosting
 
 ### 1. Setup
@@ -242,6 +247,9 @@ src/
     ├── observability.py      # Per-command correlation id, outcome, and latency
     ├── command_errors.py     # ← One failure path for every command and button
     ├── discord_errors.py     # Classifies Discord API failures (fixable vs transient)
+    ├── discord_retry.py      # Bounded retry/backoff for Discord calls, honouring retry_after
+    ├── backoff.py            # Shared Retry-After parsing and jittered backoff
+    ├── store_client.py       # HTTPS client for tagbot-store (retries, timeouts)
     ├── lifecycle.py          # Graceful shutdown on SIGINT/SIGTERM
     ├── tasks.py              # Background task supervision and shutdown drain
     └── environment.py        # Startup config validation

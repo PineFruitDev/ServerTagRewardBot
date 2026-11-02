@@ -28,7 +28,7 @@ from typing import NamedTuple
 import discord
 from discord import app_commands
 
-from src.services.discord_errors import describe, user_message
+from src.services.discord_errors import API_FAILURES, describe, user_message
 from src.services.logger import get_logger
 from src.services.observability import correlated, record_untimed_failure
 from src.services.store_client import StoreError, StoreUnavailable
@@ -89,7 +89,7 @@ def classify(error: Exception) -> Failure:
     if isinstance(error, StoreError):
         return Failure("was rejected by the store", STORE_REJECTED_MESSAGE)
 
-    if isinstance(error, discord.HTTPException):
+    if isinstance(error, API_FAILURES):
         # The status is what separates a fixable setup problem (the reward role
         # sitting above the bot's own) from an outage or a rate limit, and those
         # want opposite responses, so neither the log line nor the reply
