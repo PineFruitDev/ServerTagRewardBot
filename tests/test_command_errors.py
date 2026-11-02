@@ -39,6 +39,9 @@ def interaction():
     """An interaction that has not been answered yet."""
     return SimpleNamespace(
         command=SimpleNamespace(name="setup"), data={},
+        guild_id=1,
+        guild=SimpleNamespace(me=SimpleNamespace(guild_permissions=discord.Permissions.all())),
+        user=SimpleNamespace(id=42, guild_permissions=discord.Permissions.all()),
         response=SimpleNamespace(is_done=lambda: False, send_message=AsyncMock(),
                                  edit_message=AsyncMock()),
         followup=SimpleNamespace(send=AsyncMock()),
@@ -241,7 +244,7 @@ async def test_the_tree_handler_reports_through_the_shared_path(interaction, emi
 
 async def test_a_failing_button_answers_the_person_who_pressed_it(interaction, emitted):
     """View.on_error logs and returns by default, leaving the press unanswered."""
-    view = SyncPromptView("1")
+    view = SyncPromptView("1", 42)
     view.sync_now.callback = AsyncMock(side_effect=StoreUnavailable("offline"))
     try:
         # Drive discord.py's own dispatch rather than calling on_error, so this
@@ -274,7 +277,7 @@ async def test_an_unlabelled_item_is_named_by_its_type(interaction, emitted):
 async def test_the_view_reports_without_the_command_on_the_interaction(interaction, emitted):
     """A component interaction carries no command, so the view supplies the name."""
     interaction.command = None
-    view = SyncPromptView("1")
+    view = SyncPromptView("1", 42)
     try:
         await view.on_error(interaction, StoreUnavailable("offline"), view.later)
     finally:
@@ -304,7 +307,7 @@ async def test_a_button_that_works_reports_nothing(interaction, emitted, monkeyp
     from src.services.tag_sync import TagSyncService
     monkeypatch.setattr(TagSyncService, "_instance",
                         SimpleNamespace(is_syncing=lambda gid: True, safe_full_sync=AsyncMock()))
-    view = SyncPromptView("1")
+    view = SyncPromptView("1", 42)
     try:
         await discord.ui.View._scheduled_task(view, view.sync_now, interaction)
         await asyncio.sleep(0)
