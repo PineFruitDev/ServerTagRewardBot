@@ -59,14 +59,28 @@ def handout_refusal(interaction: discord.Interaction, role: discord.Role) -> str
     return None
 
 
+#: What an unanswered prompt leaves in place of its buttons. A timeout means
+#: nobody said yes, which is what the "Later" button means too, so the advice
+#: matches it. It also restates what /setup already did, because the content it
+#: replaces is that confirmation and the admin may not have read it.
+SYNC_PROMPT_EXPIRED = (
+    "✅ Setup is saved. Members get the role as they equip the tag, or run /sync "
+    "anytime to catch everyone at once."
+)
+
+
 class SyncPromptView(GuardedView):
     """Final step of setup: offer to run the first sync right away."""
 
     command_name = "setup"
+    expiry_notice = SYNC_PROMPT_EXPIRED
 
-    def __init__(self, guild_id: str, author_id: int):
-
-        super().__init__(timeout=300)
+    def __init__(self, guild_id: str, author_id: int, *,
+                 origin: discord.Interaction | None = None):
+        # origin is the /setup interaction this prompt is the reply to, which is
+        # what lets the prompt retire itself when it expires (GuardedView.
+        # on_timeout). Optional so the view is still constructible on its own.
+        super().__init__(timeout=300, origin=origin)
         self.guild_id = guild_id
         self.author_id = author_id
 
@@ -89,11 +103,7 @@ class SyncPromptView(GuardedView):
         return False
 
     async def _finish(self, interaction: discord.Interaction, message: str) -> None:
-        for child in self.children:
-            # The base Item type has no disabled flag; this view holds only
-            # buttons, so nothing is skipped in practice.
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
+        self.disable_buttons()
         await interaction.response.edit_message(content=message, view=self)
 
     @discord.ui.button(label="Sync now", style=discord.ButtonStyle.primary, emoji="🔄")
@@ -234,6 +244,6 @@ class SetupCommand(Command):
             f"✅ Set up! Members repping this server's tag now receive {role.mention}.\n\n"
             "**Would you like to sync your server tag rewards now?** "
             "This checks every current member once so existing tag-wearers get the role immediately.",
-            view=SyncPromptView(str(guild.id), interaction.user.id),
+            view=SyncPromptView(str(guild.id), interaction.user.id, origin=interaction),
             ephemeral=True,
         )
