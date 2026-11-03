@@ -168,6 +168,28 @@ async def test_manual_sync_only_runs_when_ready(interaction, monkeypatch, config
         interaction.response.defer.assert_not_awaited()
 
 
+async def test_manual_sync_does_not_claim_a_run_the_service_refused(interaction, monkeypatch):
+    """full_sync answers None for a run it did not perform, and that is not success.
+
+    The statistics are one object per guild, so the alternative is reporting
+    the figures of whichever sync does hold the guild, or of one that finished
+    hours ago, as the sync this command had just completed.
+    """
+    monkeypatch.setattr(GuildConfig, "_instance",
+                        SimpleNamespace(get_role=AsyncMock(return_value="10")))
+    # Nothing is running when /sync looks; the service still refuses, which is
+    # what happens when a sync starts while the interaction is being deferred.
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        is_syncing=lambda gid: False, full_sync=AsyncMock(return_value=None),
+    ))
+
+    await SyncCommand().execute(interaction)
+
+    sent = interaction.followup.send.await_args.args[0]
+    assert "already in progress" in sent
+    assert "Sync complete" not in sent and "Members checked" not in sent
+
+
 @pytest.mark.parametrize("done", [True, False])
 @pytest.mark.parametrize("error,fragment", [
     (StoreUnavailable("offline"), "can't reach my storage"),

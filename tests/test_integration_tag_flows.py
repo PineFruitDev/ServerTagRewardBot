@@ -297,8 +297,9 @@ async def test_overlapping_full_syncs_do_not_run_twice(bot):
     try:
         await asyncio.wait_for(entered.wait(), 1)
         assert bot.service.is_syncing(GUILD) is True
-        second = await bot.service.full_sync(GUILD)
-        assert second.members_checked == 0
+        # None rather than the guild's statistics: those belong to the run in
+        # flight, and a caller handed them cannot tell them from its own.
+        assert await bot.service.full_sync(GUILD) is None
     finally:
         release.set()
         await first

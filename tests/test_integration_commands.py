@@ -161,6 +161,49 @@ async def test_sync_refuses_to_pile_up_on_a_running_sync(ui):
     assert "already in progress" in interaction.replied
 
 
+async def test_sync_does_not_report_a_run_another_sync_took_from_it(ui):
+    """The window does not close at /sync's own is_syncing check.
+
+    Deferring the interaction is a round trip to Discord, and a sync can start
+    inside it: a second admin running /sync, the "Sync now" button on /setup,
+    or the startup sync. The service refuses the run at that point, and the
+    statistics it would hand back are one object per guild, shared by every
+    sync and by the live gateway path. Reporting them anyway told the admin
+    "Sync complete" over whatever the other run had reached so far, or over a
+    sync from hours ago, for a run that walked no members at all.
+    """
+    entered, release = asyncio.Event(), asyncio.Event()
+    ui.http.seed_members(GUILD, [member_payload(ALICE, GUILD)])
+    real_get_members = ui.http.get_members
+
+    async def gated(guild_id, *, limit, after):
+        entered.set()
+        await release.wait()
+        return await real_get_members(guild_id, limit=limit, after=after)
+
+    ui.http.get_members = gated
+    interaction = FakeInteraction()
+    real_defer = interaction.response.defer
+    taken: list[asyncio.Task] = []
+
+    async def defer_then_lose_the_guild(**kwargs):
+        await real_defer(**kwargs)
+        taken.append(asyncio.create_task(ui.service.full_sync(GUILD)))
+        await asyncio.wait_for(entered.wait(), 1)
+
+    interaction.response.defer = defer_then_lose_the_guild
+    try:
+        await ui.run("sync", interaction=interaction)
+    finally:
+        release.set()
+        await asyncio.gather(*taken)
+
+    assert "already in progress" in interaction.followed_up
+    assert "Sync complete" not in interaction.followed_up
+    # The run that did hold the guild still did its work.
+    assert ui.has_reward(ALICE)
+
+
 # --------------------------------------------------------------------------- #
 # /status
 # --------------------------------------------------------------------------- #

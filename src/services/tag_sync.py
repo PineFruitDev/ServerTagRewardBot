@@ -274,8 +274,15 @@ class TagSyncService:
 
         return True
 
-    async def full_sync(self, guild_id: str) -> GuildStats:
+    async def full_sync(self, guild_id: str) -> GuildStats | None:
         """Walk every member of one guild and reconcile the reward role.
+
+        Returns None when this call did no work because another sync already
+        held the guild. The statistics are one object per guild, shared by
+        every sync and by the live gateway path, so handing it back for a run
+        that never happened gives the caller somebody else's figures with
+        nothing to mark them as such: /sync reported the other run's progress,
+        or a run from hours ago, as the sync it had just finished.
 
         Member list payloads can omit primary_guild, so users are re-fetched
         individually (throttled) when the field is missing.
@@ -287,9 +294,14 @@ class TagSyncService:
         if role_id is None:
             return stats
 
+        # Checked here rather than trusted from the caller: a caller's own look
+        # at is_syncing is already stale by the time it gets here, because
+        # reading the guild's configuration above is a store round trip. Nothing
+        # is awaited between this test and the acquire below, so the pair is
+        # atomic on the event loop.
         if self.is_syncing(guild_id):
             log.warning("full_sync - [%s] Sync already in progress, skipping", guild_id)
-            return stats
+            return None
 
         async with self._lock_for(guild_id):
             config = Environment.get_config()
