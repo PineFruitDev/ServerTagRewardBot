@@ -333,6 +333,38 @@ async def test_help_lists_command_restrictions(interaction, guild_only, develope
     assert restrictions == ([expected] if expected else [])
 
 
+async def test_help_covers_every_slash_command_the_registry_registers(interaction):
+    """A Command can register more than one slash command; help must list each.
+
+    SetupCommand registers /disable alongside /setup, so help built from
+    help_info alone omitted /disable from the overview and told anyone who
+    asked for it that no such command existed.
+    """
+    commands = build_registry()
+    tree = FakeTree()
+    CommandManager(commands).register_all(tree)
+
+    await HelpCommand(commands).execute(interaction)
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    listed = {line.split("`")[1].lstrip("/")
+              for field in embed.fields for line in field.value.splitlines()}
+    assert listed == set(tree.commands)
+
+    for slash in tree.commands:
+        await HelpCommand(commands)._show_specific(interaction, slash)
+        reply = interaction.response.send_message.await_args
+        assert reply.kwargs.get("embed") is not None, f"/{slash} has no help entry"
+        assert reply.kwargs["embed"].title == f"📖 Help: /{slash}"
+
+
+async def test_help_detail_for_disable_carries_setups_own_restrictions(interaction):
+    """The gates belong to the Command, so both its slash commands show them."""
+    await HelpCommand([SetupCommand()])._show_specific(interaction, "disable")
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert embed.fields[0].value == "`/disable`"
+    assert [f.value for f in embed.fields if f.name == "⚠️ Restrictions"] == ["Server only"]
+
+
 async def test_help_callback_routes_between_overview_and_detail(interaction):
     command = HelpCommand([PingCommand()])
     callback = register(command)["help"]
