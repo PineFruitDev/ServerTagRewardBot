@@ -6,6 +6,8 @@ each callback so it can be invoked directly without a Discord connection.
 """
 
 import asyncio
+import io
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -21,7 +23,9 @@ from src.commands.repped import ReppedCommand
 from src.commands.setup import SetupCommand, SyncPromptView
 from src.commands.status import StatusCommand
 from src.commands.sync import SyncCommand
+from src.core import view as view_module
 from src.core.command_manager import CommandManager
+from src.core.view import GuardedView
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.streaks import StreakStore
@@ -245,6 +249,74 @@ async def test_sync_prompt_later_leaves_sync_untouched(interaction, view, monkey
     service.safe_full_sync.assert_not_awaited()
     assert "/sync anytime" in interaction.response.edit_message.await_args.kwargs["content"]
     assert all(child.disabled for child in view.children)
+
+
+# --- the prompt expiring unanswered -----------------------------------------
+
+@pytest.fixture
+def view_log(monkeypatch):
+    """Capture what src/core/view.py logs. Its logger does not propagate."""
+    stream = io.StringIO()
+    monkeypatch.setattr(view_module.log, "handlers", [logging.StreamHandler(stream)])
+    return stream
+
+
+async def test_an_expired_sync_prompt_retires_itself(interaction):
+    """discord.py drops a timed-out view, so its buttons stop being dispatched.
+
+    They keep rendering as enabled until the message is edited, and an
+    undispatched press is never answered, so an admin who stepped away from
+    /setup for five minutes came back to a live-looking prompt that answered
+    with Discord's own "This interaction failed" and never mentioned /sync.
+    """
+    interaction.edit_original_response = AsyncMock()
+    view = SyncPromptView("1", 42, origin=interaction)
+    try:
+        await view.on_timeout()
+    finally:
+        view.stop()
+
+    edited = interaction.edit_original_response.await_args.kwargs
+    # Says setup is saved (the confirmation it writes over) and where the offer
+    # it is retiring can still be taken up.
+    assert "/sync" in edited["content"] and "saved" in edited["content"]
+    # Sent back with the prompt, so the buttons stop inviting a press that
+    # cannot be served.
+    assert edited["view"] is view
+    assert all(child.disabled for child in view.children)
+
+
+async def test_the_library_default_no_longer_handles_an_expired_prompt():
+    """discord.ui.View.on_timeout does nothing, which is what this replaces."""
+    assert SyncPromptView.on_timeout is GuardedView.on_timeout
+    assert GuardedView.on_timeout is not discord.ui.View.on_timeout
+
+
+async def test_an_expired_prompt_without_its_interaction_still_closes_quietly():
+    """A view built without an origin has no message to edit, and must not raise.
+
+    on_timeout runs in a bare task of discord.py's own making, so anything
+    raised here is lost to the library's logger rather than handled.
+    """
+    view = GuardedView(timeout=300)
+    view.add_item(discord.ui.Button(label="x"))
+    try:
+        await view.on_timeout()
+    finally:
+        view.stop()
+    assert all(child.disabled for child in view.children)
+
+
+async def test_a_prompt_that_cannot_be_edited_is_reported_and_not_raised(interaction, view_log):
+    """The reply can have been dismissed, and Discord can refuse the edit."""
+    interaction.edit_original_response = AsyncMock(
+        side_effect=discord.DiscordException("message is gone"))
+    view = SyncPromptView("1", 42, origin=interaction)
+    try:
+        await view.on_timeout()
+    finally:
+        view.stop()
+    assert "/setup could not retire its expired prompt" in view_log.getvalue()
 
 
 # --- /status ----------------------------------------------------------------
