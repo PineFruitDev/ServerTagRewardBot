@@ -156,3 +156,16 @@ async def test_unknown_command_reply_cannot_ping_or_format(context):
     mentions = sent.kwargs["allowed_mentions"]
     assert (mentions.everyone, mentions.users, mentions.roles) == (False, False, False)
     assert sent.kwargs["ephemeral"] is True
+
+
+@pytest.mark.parametrize("active,total", [(True, 180), (False, 180), (False, 0)])
+async def test_repped_displays_markdown_in_names_literally(context, active, total):
+    interaction, _, store = context
+    interaction.user.display_name = "**Tester** _name_"
+    store.get.return_value = dict(active=active, current=60 if active else 0,
+                                  longest=120 if total else 0, total=total)
+    await ReppedCommand().execute(interaction)
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert embed.description.startswith(r"\*\*Tester\*\* \_name\_")
+    if active:
+        assert "**1m**" in embed.description

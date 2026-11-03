@@ -58,13 +58,14 @@ class ReppedCommand(Command):
 
         stats = await StreakStore.get_instance().get(guild_id, str(member.id))
 
+        display_name = discord.utils.escape_markdown(member.display_name)
         title = "🏷️ Tag Streak"
         if stats["active"]:
-            headline = f"{member.display_name} has been repping the tag for **{humanize(stats['current'])}**"
+            headline = f"{display_name} has been repping the tag for **{humanize(stats['current'])}**"
         elif stats["total"] > 0:
-            headline = f"{member.display_name} isn't repping the tag right now"
+            headline = f"{display_name} isn't repping the tag right now"
         else:
-            headline = f"{member.display_name} hasn't repped the tag yet"
+            headline = f"{display_name} hasn't repped the tag yet"
 
         embed = (
             discord.Embed(title=title, description=headline, color=0x5865F2)
