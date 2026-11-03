@@ -19,6 +19,7 @@ from src.commands.leaderboard import LeaderboardCommand
 from src.commands.ping import PingCommand
 from src.commands.repped import ReppedCommand
 from src.commands.setup import SetupCommand, SyncPromptView
+from src.commands import status as status_module
 from src.commands.status import StatusCommand
 from src.commands.sync import SyncCommand
 from src.core.command_manager import CommandManager
@@ -285,6 +286,67 @@ async def test_status_reports_a_sync_that_has_never_run(interaction, config, mon
     await StatusCommand().execute(interaction)
     embed = interaction.response.send_message.await_args.kwargs["embed"]
     assert embed.fields[-1].value == "Not yet run"
+
+
+async def test_status_reports_a_reward_role_it_cannot_manage(interaction, config, monkeypatch):
+    """The live path records this from the first equipped tag, before any sync.
+
+    So the counts are all zero and "Last Full Sync" still reads "Not yet run":
+    without the warning the embed describes a server where nothing has happened
+    yet rather than one where every grant is being refused, and /sync is the
+    only other command that would say so.
+    """
+    stats = GuildStats(live_updates=1, role_blocked="HTTP 403 (Discord error 50013)")
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        stats_for=lambda gid: stats, is_syncing=lambda gid: False,
+    ))
+
+    await StatusCommand().execute(interaction)
+
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    # First field, so it is read before the counts it explains.
+    assert "⚠️" in embed.fields[0].name
+    assert "HTTP 403" in embed.fields[0].value
+    assert "Manage Roles" in embed.fields[0].value
+    assert embed.fields[0].inline is False
+    assert embed.color.value == status_module.BLOCKED_COLOR
+    # The statistics are still reported alongside it.
+    assert embed.fields[-1].value == "Not yet run"
+
+
+async def test_status_reports_a_stall_as_temporary_not_as_a_misconfiguration(
+        interaction, config, monkeypatch):
+    """A rate limit is not something the admin can fix in Server Settings.
+
+    Wording it like role_blocked would send them to change permissions that
+    were never the problem, exactly as /sync is careful not to.
+    """
+    stats = GuildStats(members_checked=12, roles_added=3, stalled_after=5)
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        stats_for=lambda gid: stats, is_syncing=lambda gid: False,
+    ))
+
+    await StatusCommand().execute(interaction)
+
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert "⚠️" in embed.fields[0].name
+    assert "5" in embed.fields[0].value and "again" in embed.fields[0].value
+    assert "Manage Roles" not in embed.fields[0].value
+    assert embed.color.value == status_module.STALLED_COLOR
+
+
+async def test_status_adds_no_warning_when_nothing_is_wrong(interaction, config, monkeypatch):
+    """The healthy embed keeps its shape: nine fields, blurple, no warning."""
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        stats_for=lambda gid: GuildStats(members_checked=12), is_syncing=lambda gid: False,
+    ))
+
+    await StatusCommand().execute(interaction)
+
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert len(embed.fields) == 9
+    assert embed.color.value == status_module.OK_COLOR
+    assert all("⚠️" not in field.name for field in embed.fields)
 
 
 # --- help restrictions ------------------------------------------------------
