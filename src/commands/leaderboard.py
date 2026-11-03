@@ -69,7 +69,9 @@ class LeaderboardCommand(Command):
 
         if not top:
             await interaction.response.send_message(
-                "📭 Nobody has repped the tag yet. Be the first: equip the server tag and start your streak!",
+                ("📭 No current streaks yet. Equip the server tag to start your streak!"
+                 if sort == "current" else
+                 "📭 Nobody has repped the tag yet. Be the first: equip the server tag and start your streak!"),
             )
             return
 
