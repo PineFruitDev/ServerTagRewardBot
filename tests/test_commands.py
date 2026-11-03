@@ -240,7 +240,10 @@ async def test_manual_sync_reports_a_stall_as_temporary_not_as_a_misconfiguratio
     """
     monkeypatch.setattr(GuildConfig, "_instance",
                         SimpleNamespace(get_role=AsyncMock(return_value="10")))
-    stats = GuildStats(members_checked=12, roles_added=3, stalled_after=5)
+    # roles_added is the lifetime counter /status reports; the run's own share
+    # is what this reply quotes, so the two are given different values here.
+    stats = GuildStats(members_checked=12, roles_added=9, stalled_after=5,
+                       last_sync_roles_added=3)
     monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
         is_syncing=lambda gid: False, full_sync=AsyncMock(return_value=stats),
     ))
@@ -249,7 +252,9 @@ async def test_manual_sync_reports_a_stall_as_temporary_not_as_a_misconfiguratio
     assert "Sync complete" not in sent
     assert "stopped early" in sent
     assert "again" in sent
-    # The work that did land is still reported.
-    assert "12" in sent and "3" in sent
+    # The work that did land is still reported, as this run's own share of it.
+    assert "Members checked before stopping:** 12" in sent
+    assert "Roles added:** 3" in sent
+    assert "9" not in sent
     # Nothing here is a permissions problem.
     assert "Manage Roles" not in sent

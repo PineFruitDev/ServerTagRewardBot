@@ -318,10 +318,31 @@ async def test_a_second_sync_of_the_same_guild_is_idempotent(bot, clock):
     stats = await bot.service.full_sync(GUILD)
 
     assert bot.http.ops() == [("add_role", GUILD, user_id(1), ROLE)]
+    # roles_added is the lifetime total, so it still carries the first run's
+    # grant; what the second run changed by itself is nothing, and that is the
+    # figure /sync reports back.
     assert stats.roles_added == 1
+    assert (stats.last_sync_roles_added, stats.last_sync_roles_removed) == (0, 0)
     assert await bot.streak(user_id(1), now=clock.now) == {
         "current": 1800, "longest": 1800, "total": 1800, "active": True,
     }
+
+
+async def test_a_sync_counts_only_its_own_role_changes(bot):
+    """Live gateway updates share the lifetime counters; a run's own share is a delta."""
+    bot.http.seed_members(GUILD, [member_payload(user_id(1), GUILD),
+                                  member_payload(user_id(2), None, roles=[ROLE])])
+    bot.http.grant(GUILD, user_id(2), ROLE)
+    # Three role changes the sync had no part in: one before it, two after.
+    await bot.equip(user_id(3))
+    stats = await bot.service.full_sync(GUILD)
+    await bot.equip(user_id(4))
+    await bot.unequip(user_id(3), roles=[ROLE])
+
+    # Lifetime: the sync's one grant and one revocation, plus the two live
+    # grants and the one live revocation around it.
+    assert (stats.roles_added, stats.roles_removed) == (3, 2)
+    assert (stats.last_sync_roles_added, stats.last_sync_roles_removed) == (1, 1)
 
 
 # --------------------------------------------------------------------------- #
