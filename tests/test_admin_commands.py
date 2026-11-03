@@ -16,7 +16,7 @@ import pytest
 from src.commands import build_registry
 from src.commands.help_command import HelpCommand
 from src.commands.leaderboard import LeaderboardCommand
-from src.commands.ping import PingCommand
+from src.commands.ping import LATENCY_PENDING, PingCommand
 from src.commands.repped import ReppedCommand
 from src.commands.setup import SetupCommand, SyncPromptView
 from src.commands.status import StatusCommand
@@ -152,6 +152,34 @@ async def test_ping_callback_responds(interaction, config):
     interaction.client = SimpleNamespace(latency=0.05)
     await register(PingCommand())["ping"](interaction)
     assert "Pong" in interaction.response.send_message.await_args.args[0]
+
+
+@pytest.mark.parametrize("latency,expected", [
+    (0.05, "50ms"),
+    (0.0, "0ms"),
+    # A measurement taken across a clock adjustment, shown as 0 rather than -3ms.
+    (-0.003, "0ms"),
+    # discord.py's own two "no figure yet" values. KeepAliveHandler starts its
+    # latency at inf and DiscordWebSocket.latency returns inf while that handler
+    # does not exist, so every connect and resume has a window of up to one
+    # heartbeat interval here; Client.latency returns nan while there is no
+    # websocket to ask at all. round() raises on both.
+    (float("inf"), LATENCY_PENDING),
+    (float("nan"), LATENCY_PENDING),
+])
+async def test_ping_reports_every_latency_the_gateway_can_report(interaction, config,
+                                                                 latency, expected):
+    """/ping must answer during the window before the first heartbeat ack.
+
+    It is the command people run when they are unsure the bot is up, which is
+    exactly when the latency figure is missing. Raising there told the user "an
+    error occurred" and logged a defect, about a bot that was working.
+    """
+    interaction.client = SimpleNamespace(latency=latency)
+    await register(PingCommand())["ping"](interaction)
+    reply = interaction.response.send_message.await_args.args[0]
+    assert "Pong" in reply
+    assert f"**API Latency:** {expected}" in reply
 
 
 @pytest.mark.parametrize("choice,expected", [
