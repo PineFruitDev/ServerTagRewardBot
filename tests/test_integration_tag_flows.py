@@ -99,6 +99,56 @@ async def test_joining_without_the_tag_costs_no_api_calls(bot):
     assert bot.store.mark_requests == []
 
 
+async def test_leaving_while_repping_banks_the_streak_instead_of_leaving_it_open(bot, clock):
+    """A departure has to end the streak, or it runs forever.
+
+    An open streak is one with active_since set, and summarize() reads its
+    current value as now - active_since. Nothing else can ever close one for a
+    member who has gone: no further member update arrives for them, and a full
+    sync walks the guild's member list, which they are no longer on. Left open,
+    their current streak grows for as long as the row exists and keeps them at
+    the top of /leaderboard, above every member who is still here.
+    """
+    await bot.equip(ALICE)
+    await bot.equip(BOB)
+    clock.advance(3600)
+    await bot.leave(ALICE)
+    # A year on the current-streak board is what this costs if the mark is lost.
+    clock.advance(365 * 86400)
+
+    assert await bot.streak(ALICE, now=clock.now) == {
+        "current": 0, "longest": 3600, "total": 3600, "active": False,
+    }
+    current = await bot.streaks.leaderboard(GUILD, sort="current", now=clock.now)
+    assert [member for member, _ in current] == [BOB]
+    # The time they did serve is kept, so their history still ranks.
+    assert await bot.streaks.leaderboard(GUILD, sort="longest", now=clock.now) == [
+        (BOB, 365 * 86400 + 3600), (ALICE, 3600),
+    ]
+
+
+async def test_leaving_without_a_streak_changes_nothing(bot):
+    """A member who never repped has nothing to bank, and no role to pull."""
+    await bot.leave(ALICE)
+
+    assert bot.http.ops() == []
+    assert bot.store.row(GUILD, ALICE) is None
+
+
+async def test_rejoining_after_leaving_starts_a_fresh_streak(bot, clock):
+    """The closed streak is history; equipping the tag again starts a new one."""
+    await bot.equip(ALICE)
+    clock.advance(600)
+    await bot.leave(ALICE)
+    clock.advance(600)
+    await bot.join(ALICE)
+
+    assert bot.has_reward(ALICE)
+    assert await bot.streak(ALICE, now=clock.now) == {
+        "current": 0, "longest": 600, "total": 600, "active": True,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Guild scoping
 # --------------------------------------------------------------------------- #

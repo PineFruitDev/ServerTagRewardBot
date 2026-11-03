@@ -391,6 +391,16 @@ class TagBot(_Bot):
         await self.dispatch("GUILD_MEMBER_ADD",
                             {"guild_id": guild_id, **member_payload(member, tag_guild, **kwargs)})
 
+    async def leave(self, member: str, guild_id: str = GUILD) -> None:
+        """The member left, was kicked, or was banned.
+
+        GUILD_MEMBER_REMOVE carries the user and nothing else: no roles, and no
+        primary_guild, because the payload describes who went rather than what
+        they were wearing.
+        """
+        await self.dispatch("GUILD_MEMBER_REMOVE",
+                            {"guild_id": guild_id, "user": {"id": str(member)}})
+
 
 class CommandBot(TagBot):
     """As TagBot, but the client is the real Bot with its real command tree.

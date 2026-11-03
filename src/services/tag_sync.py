@@ -6,6 +6,10 @@ object as `primary_guild` ({ identity_guild_id, identity_enabled, tag, badge }).
 A member is repping a server's tag when identity_guild_id matches that guild
 and identity_enabled is true. The GUILD_MEMBER_UPDATE gateway event fires when
 the field changes, so role updates land within seconds across every guild.
+
+GUILD_MEMBER_REMOVE is watched for the other half of that: a member who has
+left the guild is not repping its tag, and no later event or sync will ever say
+so on their behalf (see _close_streak).
 """
 
 import asyncio
@@ -139,7 +143,7 @@ class TagSyncService:
             return
 
         event = payload.get("t")
-        if event not in ("GUILD_MEMBER_UPDATE", "GUILD_MEMBER_ADD"):
+        if event not in ("GUILD_MEMBER_UPDATE", "GUILD_MEMBER_ADD", "GUILD_MEMBER_REMOVE"):
             return
 
         data = payload.get("d")
@@ -159,6 +163,10 @@ class TagSyncService:
         # Only act in guilds an admin has configured
         role_id = await GuildConfig.get_instance().get_role(guild_id)
         if role_id is None:
+            return
+
+        if event == "GUILD_MEMBER_REMOVE":
+            await self._close_streak(guild_id, user_id)
             return
 
         repping = self.is_repping(user, guild_id)
@@ -196,6 +204,38 @@ class TagSyncService:
         stored = await self._record_streaks(guild_id, [(user_id, repping)])
         if role_ok and stored:
             cooldowns.record_reward(guild_id, user_id, repping)
+
+    async def _close_streak(self, guild_id: str, user_id: str) -> None:
+        """Bank a departing member's streak, because nothing else ever will.
+
+        A streak is open while active_since is set, and only a not-repping mark
+        closes it. Every other way that mark gets sent needs the member to still
+        be here: GUILD_MEMBER_UPDATE stops arriving for someone who has left,
+        and a full sync walks the guild's member list, which no longer includes
+        them. So a member who leaves while repping leaves a streak that nothing
+        can ever close, and summarize() reads an open streak as current =
+        now - active_since. Their /repped and /leaderboard figures therefore
+        keep growing for as long as the row exists, and because the current
+        streak board ranks on exactly that, a member who left a year ago sits
+        permanently above everyone who is still here.
+
+        Closing it here banks the time they did serve into total_seconds and
+        longest_seconds, so their history survives in the longest and all-time
+        rankings while the current one stops counting a streak that ended.
+
+        No role write: their roles left with them, and Discord answers an unknown
+        member 404 for the call. The mark costs one store round trip per
+        departure from a configured guild, which is a far rarer event than the
+        member updates _apply_live collapses.
+        """
+        # The decision the bot last applied described a member who was here and
+        # a streak that was open, and neither is true now, so it is dropped
+        # rather than left to collapse the first event after a rejoin. That
+        # matters where a role-restore bot hands the reward role straight back:
+        # the rejoin would then carry roles agreeing with the stale decision,
+        # which is both halves of _apply_live's test for noise.
+        Cooldowns.get_instance().forget_reward(guild_id, user_id)
+        await self._record_streaks(guild_id, [(user_id, False)])
 
     @staticmethod
     async def _record_streaks(guild_id: str, marks: list[tuple[str, bool]]) -> bool:
