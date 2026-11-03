@@ -127,6 +127,19 @@ class SetupCommand(Command):
         category="Admin",
     )
 
+    # register() attaches /disable to the tree as well, so it needs its own
+    # entry: the help system lists slash commands, and a Command describes only
+    # its first one.
+    extra_help = (
+        CommandHelpInfo(
+            name="disable",
+            description="Stop managing the tag reward role in this server",
+            usage="/disable",
+            examples=["/disable"],
+            category="Admin",
+        ),
+    )
+
     required_permissions = ("manage_roles",)
     required_user_permissions = ("manage_guild", "administrator")
     guild_only = True
