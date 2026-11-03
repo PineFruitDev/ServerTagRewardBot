@@ -80,15 +80,20 @@ class SyncCommand(Command):
                 f"That usually means Discord is rate limiting me or having trouble.\n"
                 f"Nothing was lost; please run /sync again shortly.\n"
                 f"👥 **Members checked before stopping:** {stats.members_checked}\n"
-                f"➕ **Roles added:** {stats.roles_added}\n"
-                f"➖ **Roles removed:** {stats.roles_removed}"
+                f"➕ **Roles added:** {stats.last_sync_roles_added}\n"
+                f"➖ **Roles removed:** {stats.last_sync_roles_removed}"
             )
             return
 
+        # Every figure here describes the run that just finished. stats also
+        # carries lifetime role totals (every sync plus every live gateway
+        # update since startup), and those belong to /status: quoting them back
+        # here told an admin running /sync a second time that it had granted
+        # every role the first run did.
         await interaction.followup.send(
             f"✅ **Sync complete**\n"
             f"👥 **Members checked:** {stats.members_checked}\n"
             f"🏷️ **Repping the tag:** {stats.currently_repping}\n"
-            f"➕ **Roles added:** {stats.roles_added}\n"
-            f"➖ **Roles removed:** {stats.roles_removed}"
+            f"➕ **Roles added:** {stats.last_sync_roles_added}\n"
+            f"➖ **Roles removed:** {stats.last_sync_roles_removed}"
         )

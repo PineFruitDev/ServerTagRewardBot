@@ -10,6 +10,7 @@ layer and the store are fakes, and no socket is opened.
 
 import asyncio
 
+import discord
 import pytest
 from discord import app_commands
 
@@ -137,6 +138,42 @@ async def test_sync_reports_what_it_reconciled(ui):
     assert "Roles added:** 1" in report
     assert "Roles removed:** 1" in report
     assert ui.has_reward(ALICE) and not ui.has_reward(BOB)
+
+
+async def test_sync_reports_only_what_the_run_itself_changed(ui):
+    """A second /sync must not re-report the first one's grants.
+
+    roles_added and roles_removed are lifetime counters shared with the live
+    gateway path, while members_checked and currently_repping are per-run, so
+    quoting all four side by side told an admin that a sync which changed
+    nothing had just granted every role the previous run did.
+    """
+    ui.http.seed_members(GUILD, [member_payload(ALICE, GUILD),
+                                 member_payload(BOB, None, roles=[ROLE])])
+    ui.http.grant(GUILD, BOB, ROLE)
+
+    first = (await ui.run("sync")).followed_up
+    assert "Roles added:** 1" in first and "Roles removed:** 1" in first
+
+    # Nothing is left to reconcile: the member list now carries the role state
+    # the first run produced. A live update lands in between too, to prove the
+    # second report does not pick that up either. /sync keeps a per-member
+    # cooldown of its own, so the second run comes from a second admin.
+    ui.http.seed_members(GUILD, [member_payload(ALICE, GUILD, roles=[ROLE]),
+                                 member_payload(BOB, None)])
+    await ui.equip(user_id(4))
+    second_admin = FakeMember(user_id(5), name="Admin2", permissions=discord.Permissions(
+        manage_guild=True, manage_roles=True))
+    second = (await ui.run("sync", interaction=FakeInteraction(user=second_admin))).followed_up
+
+    assert "Members checked:** 2" in second
+    assert "Roles added:** 0" in second
+    assert "Roles removed:** 0" in second
+
+    # The lifetime totals are still there for /status: the first sync's grant
+    # plus the equip in between, and the first sync's one removal.
+    fields = field_values((await ui.run("status")).embed)
+    assert (fields["Roles Added"], fields["Roles Removed"]) == ("2", "1")
 
 
 async def test_sync_refuses_to_pile_up_on_a_running_sync(ui):

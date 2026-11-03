@@ -56,6 +56,9 @@ class GuildStats:
     """Per-guild statistics from the most recent sync."""
 
     members_checked: int = 0
+    #: Lifetime totals, across every full sync and every live gateway update
+    #: this process has handled. /status reports these; a single sync's report
+    #: must not, which is what last_sync_roles_added below is for.
     roles_added: int = 0
     roles_removed: int = 0
     currently_repping: int = 0
@@ -64,6 +67,14 @@ class GuildStats:
     #: they cost no role write and no store round trip (see cooldowns.py).
     duplicates_collapsed: int = 0
     last_sync_at: datetime | None = field(default=None)
+    #: What the most recent full sync changed by itself, which is the only
+    #: honest answer to "what did the /sync I just ran do". members_checked and
+    #: currently_repping are already per-run (full_sync assigns them), so
+    #: reporting the lifetime role counters alongside them told an admin who
+    #: ran /sync twice that the second run had granted every role the first one
+    #: did, and counted every live gateway update in between as well.
+    last_sync_roles_added: int = 0
+    last_sync_roles_removed: int = 0
     #: Set when a role write failed in a way that affects the whole guild (see
     #: discord_errors.blocks_whole_guild). A full sync stops on it instead of
     #: repeating a doomed call per member, and commands report it.
@@ -302,6 +313,11 @@ class TagSyncService:
             # permissions since the last run, and an outage may have passed.
             stats.role_blocked = None
             stats.stalled_after = None
+            # apply_role only knows the lifetime counters, so this run's own
+            # share of them is the difference it makes to them. Cleared first so
+            # a run that stops early never reports the previous run's figures.
+            stats.last_sync_roles_added = stats.last_sync_roles_removed = 0
+            added_before, removed_before = stats.roles_added, stats.roles_removed
 
             while True:
                 batch = await self._fetch_members(guild_id, after)
@@ -376,6 +392,10 @@ class TagSyncService:
 
             stats.members_checked = checked
             stats.currently_repping = repping
+            # Every exit from the loop above lands here, including the two early
+            # stops, so a partial run reports what it managed rather than zero.
+            stats.last_sync_roles_added = stats.roles_added - added_before
+            stats.last_sync_roles_removed = stats.roles_removed - removed_before
             stats.last_sync_at = datetime.now(timezone.utc)
             log.info("full_sync - [%s] Complete: %d members checked, %d repping", guild_id, checked, repping)
 
