@@ -114,6 +114,32 @@ async def test_gateway_events_reconcile_roles_and_streaks(sync, event, repping, 
     assert sync.service.stats_for("1").live_updates == int(event == "GUILD_MEMBER_UPDATE")
 
 
+async def test_a_departure_closes_a_streak_nothing_else_could_close(sync):
+    """A member who leaves is marked not repping, with no role call.
+
+    No GUILD_MEMBER_UPDATE arrives for someone who has left and a full sync
+    only walks the members still in the guild, so a streak left open here can
+    never be closed again.
+    """
+    await sync.service.on_socket_raw_receive(json.dumps({
+        "t": "GUILD_MEMBER_REMOVE", "d": {"guild_id": "1", "user": {"id": "42"}},
+    }))
+    sync.streaks.mark_many.assert_awaited_once_with("1", [("42", False)])
+    # Their roles left with them; the call would be an unknown-member 404.
+    sync.http.add_role.assert_not_awaited()
+    sync.http.remove_role.assert_not_awaited()
+    # A departure is not a member update, so it does not count as one.
+    assert sync.service.stats_for("1").live_updates == 0
+
+
+async def test_a_departure_from_an_unconfigured_guild_costs_nothing(sync):
+    sync.config.get_role.return_value = None
+    await sync.service.on_socket_raw_receive(json.dumps({
+        "t": "GUILD_MEMBER_REMOVE", "d": {"guild_id": "1", "user": {"id": "42"}},
+    }))
+    sync.streaks.mark_many.assert_not_awaited()
+
+
 @pytest.mark.parametrize("payload", [
     b"compressed", "{", "null", "[]", "{}",
     '{"t":"MESSAGE_CREATE","d":{}}',

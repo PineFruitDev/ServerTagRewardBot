@@ -99,6 +99,56 @@ async def test_joining_without_the_tag_costs_no_api_calls(bot):
     assert bot.store.mark_requests == []
 
 
+async def test_leaving_while_repping_banks_the_streak_instead_of_leaving_it_open(bot, clock):
+    """A departure has to end the streak, or it runs forever.
+
+    An open streak is one with active_since set, and summarize() reads its
+    current value as now - active_since. Nothing else can ever close one for a
+    member who has gone: no further member update arrives for them, and a full
+    sync walks the guild's member list, which they are no longer on. Left open,
+    their current streak grows for as long as the row exists and keeps them at
+    the top of /leaderboard, above every member who is still here.
+    """
+    await bot.equip(ALICE)
+    await bot.equip(BOB)
+    clock.advance(3600)
+    await bot.leave(ALICE)
+    # A year on the current-streak board is what this costs if the mark is lost.
+    clock.advance(365 * 86400)
+
+    assert await bot.streak(ALICE, now=clock.now) == {
+        "current": 0, "longest": 3600, "total": 3600, "active": False,
+    }
+    current = await bot.streaks.leaderboard(GUILD, sort="current", now=clock.now)
+    assert [member for member, _ in current] == [BOB]
+    # The time they did serve is kept, so their history still ranks.
+    assert await bot.streaks.leaderboard(GUILD, sort="longest", now=clock.now) == [
+        (BOB, 365 * 86400 + 3600), (ALICE, 3600),
+    ]
+
+
+async def test_leaving_without_a_streak_changes_nothing(bot):
+    """A member who never repped has nothing to bank, and no role to pull."""
+    await bot.leave(ALICE)
+
+    assert bot.http.ops() == []
+    assert bot.store.row(GUILD, ALICE) is None
+
+
+async def test_rejoining_after_leaving_starts_a_fresh_streak(bot, clock):
+    """The closed streak is history; equipping the tag again starts a new one."""
+    await bot.equip(ALICE)
+    clock.advance(600)
+    await bot.leave(ALICE)
+    clock.advance(600)
+    await bot.join(ALICE)
+
+    assert bot.has_reward(ALICE)
+    assert await bot.streak(ALICE, now=clock.now) == {
+        "current": 0, "longest": 600, "total": 600, "active": True,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Guild scoping
 # --------------------------------------------------------------------------- #
@@ -297,8 +347,9 @@ async def test_overlapping_full_syncs_do_not_run_twice(bot):
     try:
         await asyncio.wait_for(entered.wait(), 1)
         assert bot.service.is_syncing(GUILD) is True
-        second = await bot.service.full_sync(GUILD)
-        assert second.members_checked == 0
+        # None rather than the guild's statistics: those belong to the run in
+        # flight, and a caller handed them cannot tell them from its own.
+        assert await bot.service.full_sync(GUILD) is None
     finally:
         release.set()
         await first
@@ -318,10 +369,31 @@ async def test_a_second_sync_of_the_same_guild_is_idempotent(bot, clock):
     stats = await bot.service.full_sync(GUILD)
 
     assert bot.http.ops() == [("add_role", GUILD, user_id(1), ROLE)]
+    # roles_added is the lifetime total, so it still carries the first run's
+    # grant; what the second run changed by itself is nothing, and that is the
+    # figure /sync reports back.
     assert stats.roles_added == 1
+    assert (stats.last_sync_roles_added, stats.last_sync_roles_removed) == (0, 0)
     assert await bot.streak(user_id(1), now=clock.now) == {
         "current": 1800, "longest": 1800, "total": 1800, "active": True,
     }
+
+
+async def test_a_sync_counts_only_its_own_role_changes(bot):
+    """Live gateway updates share the lifetime counters; a run's own share is a delta."""
+    bot.http.seed_members(GUILD, [member_payload(user_id(1), GUILD),
+                                  member_payload(user_id(2), None, roles=[ROLE])])
+    bot.http.grant(GUILD, user_id(2), ROLE)
+    # Three role changes the sync had no part in: one before it, two after.
+    await bot.equip(user_id(3))
+    stats = await bot.service.full_sync(GUILD)
+    await bot.equip(user_id(4))
+    await bot.unequip(user_id(3), roles=[ROLE])
+
+    # Lifetime: the sync's one grant and one revocation, plus the two live
+    # grants and the one live revocation around it.
+    assert (stats.roles_added, stats.roles_removed) == (3, 2)
+    assert (stats.last_sync_roles_added, stats.last_sync_roles_removed) == (1, 1)
 
 
 # --------------------------------------------------------------------------- #

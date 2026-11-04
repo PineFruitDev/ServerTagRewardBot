@@ -6,6 +6,8 @@ each callback so it can be invoked directly without a Discord connection.
 """
 
 import asyncio
+import io
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -16,12 +18,15 @@ import pytest
 from src.commands import build_registry
 from src.commands.help_command import HelpCommand
 from src.commands.leaderboard import LeaderboardCommand
-from src.commands.ping import PingCommand
+from src.commands.ping import LATENCY_PENDING, PingCommand
 from src.commands.repped import ReppedCommand
 from src.commands.setup import SetupCommand, SyncPromptView
+from src.commands import status as status_module
 from src.commands.status import StatusCommand
 from src.commands.sync import SyncCommand
+from src.core import view as view_module
 from src.core.command_manager import CommandManager
+from src.core.view import GuardedView
 from src.services.environment import Environment
 from src.services.guild_config import GuildConfig
 from src.services.streaks import StreakStore
@@ -154,6 +159,34 @@ async def test_ping_callback_responds(interaction, config):
     assert "Pong" in interaction.response.send_message.await_args.args[0]
 
 
+@pytest.mark.parametrize("latency,expected", [
+    (0.05, "50ms"),
+    (0.0, "0ms"),
+    # A measurement taken across a clock adjustment, shown as 0 rather than -3ms.
+    (-0.003, "0ms"),
+    # discord.py's own two "no figure yet" values. KeepAliveHandler starts its
+    # latency at inf and DiscordWebSocket.latency returns inf while that handler
+    # does not exist, so every connect and resume has a window of up to one
+    # heartbeat interval here; Client.latency returns nan while there is no
+    # websocket to ask at all. round() raises on both.
+    (float("inf"), LATENCY_PENDING),
+    (float("nan"), LATENCY_PENDING),
+])
+async def test_ping_reports_every_latency_the_gateway_can_report(interaction, config,
+                                                                 latency, expected):
+    """/ping must answer during the window before the first heartbeat ack.
+
+    It is the command people run when they are unsure the bot is up, which is
+    exactly when the latency figure is missing. Raising there told the user "an
+    error occurred" and logged a defect, about a bot that was working.
+    """
+    interaction.client = SimpleNamespace(latency=latency)
+    await register(PingCommand())["ping"](interaction)
+    reply = interaction.response.send_message.await_args.args[0]
+    assert "Pong" in reply
+    assert f"**API Latency:** {expected}" in reply
+
+
 @pytest.mark.parametrize("choice,expected", [
     (None, "current"),
     (SimpleNamespace(value="longest"), "longest"),
@@ -247,6 +280,74 @@ async def test_sync_prompt_later_leaves_sync_untouched(interaction, view, monkey
     assert all(child.disabled for child in view.children)
 
 
+# --- the prompt expiring unanswered -----------------------------------------
+
+@pytest.fixture
+def view_log(monkeypatch):
+    """Capture what src/core/view.py logs. Its logger does not propagate."""
+    stream = io.StringIO()
+    monkeypatch.setattr(view_module.log, "handlers", [logging.StreamHandler(stream)])
+    return stream
+
+
+async def test_an_expired_sync_prompt_retires_itself(interaction):
+    """discord.py drops a timed-out view, so its buttons stop being dispatched.
+
+    They keep rendering as enabled until the message is edited, and an
+    undispatched press is never answered, so an admin who stepped away from
+    /setup for five minutes came back to a live-looking prompt that answered
+    with Discord's own "This interaction failed" and never mentioned /sync.
+    """
+    interaction.edit_original_response = AsyncMock()
+    view = SyncPromptView("1", 42, origin=interaction)
+    try:
+        await view.on_timeout()
+    finally:
+        view.stop()
+
+    edited = interaction.edit_original_response.await_args.kwargs
+    # Says setup is saved (the confirmation it writes over) and where the offer
+    # it is retiring can still be taken up.
+    assert "/sync" in edited["content"] and "saved" in edited["content"]
+    # Sent back with the prompt, so the buttons stop inviting a press that
+    # cannot be served.
+    assert edited["view"] is view
+    assert all(child.disabled for child in view.children)
+
+
+async def test_the_library_default_no_longer_handles_an_expired_prompt():
+    """discord.ui.View.on_timeout does nothing, which is what this replaces."""
+    assert SyncPromptView.on_timeout is GuardedView.on_timeout
+    assert GuardedView.on_timeout is not discord.ui.View.on_timeout
+
+
+async def test_an_expired_prompt_without_its_interaction_still_closes_quietly():
+    """A view built without an origin has no message to edit, and must not raise.
+
+    on_timeout runs in a bare task of discord.py's own making, so anything
+    raised here is lost to the library's logger rather than handled.
+    """
+    view = GuardedView(timeout=300)
+    view.add_item(discord.ui.Button(label="x"))
+    try:
+        await view.on_timeout()
+    finally:
+        view.stop()
+    assert all(child.disabled for child in view.children)
+
+
+async def test_a_prompt_that_cannot_be_edited_is_reported_and_not_raised(interaction, view_log):
+    """The reply can have been dismissed, and Discord can refuse the edit."""
+    interaction.edit_original_response = AsyncMock(
+        side_effect=discord.DiscordException("message is gone"))
+    view = SyncPromptView("1", 42, origin=interaction)
+    try:
+        await view.on_timeout()
+    finally:
+        view.stop()
+    assert "/setup could not retire its expired prompt" in view_log.getvalue()
+
+
 # --- /status ----------------------------------------------------------------
 
 async def test_status_prompts_setup_when_unconfigured(interaction, config, monkeypatch):
@@ -287,6 +388,67 @@ async def test_status_reports_a_sync_that_has_never_run(interaction, config, mon
     assert embed.fields[-1].value == "Not yet run"
 
 
+async def test_status_reports_a_reward_role_it_cannot_manage(interaction, config, monkeypatch):
+    """The live path records this from the first equipped tag, before any sync.
+
+    So the counts are all zero and "Last Full Sync" still reads "Not yet run":
+    without the warning the embed describes a server where nothing has happened
+    yet rather than one where every grant is being refused, and /sync is the
+    only other command that would say so.
+    """
+    stats = GuildStats(live_updates=1, role_blocked="HTTP 403 (Discord error 50013)")
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        stats_for=lambda gid: stats, is_syncing=lambda gid: False,
+    ))
+
+    await StatusCommand().execute(interaction)
+
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    # First field, so it is read before the counts it explains.
+    assert "⚠️" in embed.fields[0].name
+    assert "HTTP 403" in embed.fields[0].value
+    assert "Manage Roles" in embed.fields[0].value
+    assert embed.fields[0].inline is False
+    assert embed.color.value == status_module.BLOCKED_COLOR
+    # The statistics are still reported alongside it.
+    assert embed.fields[-1].value == "Not yet run"
+
+
+async def test_status_reports_a_stall_as_temporary_not_as_a_misconfiguration(
+        interaction, config, monkeypatch):
+    """A rate limit is not something the admin can fix in Server Settings.
+
+    Wording it like role_blocked would send them to change permissions that
+    were never the problem, exactly as /sync is careful not to.
+    """
+    stats = GuildStats(members_checked=12, roles_added=3, stalled_after=5)
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        stats_for=lambda gid: stats, is_syncing=lambda gid: False,
+    ))
+
+    await StatusCommand().execute(interaction)
+
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert "⚠️" in embed.fields[0].name
+    assert "5" in embed.fields[0].value and "again" in embed.fields[0].value
+    assert "Manage Roles" not in embed.fields[0].value
+    assert embed.color.value == status_module.STALLED_COLOR
+
+
+async def test_status_adds_no_warning_when_nothing_is_wrong(interaction, config, monkeypatch):
+    """The healthy embed keeps its shape: nine fields, blurple, no warning."""
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        stats_for=lambda gid: GuildStats(members_checked=12), is_syncing=lambda gid: False,
+    ))
+
+    await StatusCommand().execute(interaction)
+
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert len(embed.fields) == 9
+    assert embed.color.value == status_module.OK_COLOR
+    assert all("⚠️" not in field.name for field in embed.fields)
+
+
 # --- help restrictions ------------------------------------------------------
 
 @pytest.mark.parametrize("guild_only,developer_only,expected", [
@@ -303,6 +465,38 @@ async def test_help_lists_command_restrictions(interaction, guild_only, develope
     embed = interaction.response.send_message.await_args.kwargs["embed"]
     restrictions = [f.value for f in embed.fields if f.name == "⚠️ Restrictions"]
     assert restrictions == ([expected] if expected else [])
+
+
+async def test_help_covers_every_slash_command_the_registry_registers(interaction):
+    """A Command can register more than one slash command; help must list each.
+
+    SetupCommand registers /disable alongside /setup, so help built from
+    help_info alone omitted /disable from the overview and told anyone who
+    asked for it that no such command existed.
+    """
+    commands = build_registry()
+    tree = FakeTree()
+    CommandManager(commands).register_all(tree)
+
+    await HelpCommand(commands).execute(interaction)
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    listed = {line.split("`")[1].lstrip("/")
+              for field in embed.fields for line in field.value.splitlines()}
+    assert listed == set(tree.commands)
+
+    for slash in tree.commands:
+        await HelpCommand(commands)._show_specific(interaction, slash)
+        reply = interaction.response.send_message.await_args
+        assert reply.kwargs.get("embed") is not None, f"/{slash} has no help entry"
+        assert reply.kwargs["embed"].title == f"📖 Help: /{slash}"
+
+
+async def test_help_detail_for_disable_carries_setups_own_restrictions(interaction):
+    """The gates belong to the Command, so both its slash commands show them."""
+    await HelpCommand([SetupCommand()])._show_specific(interaction, "disable")
+    embed = interaction.response.send_message.await_args.kwargs["embed"]
+    assert embed.fields[0].value == "`/disable`"
+    assert [f.value for f in embed.fields if f.name == "⚠️ Restrictions"] == ["Server only"]
 
 
 async def test_help_callback_routes_between_overview_and_detail(interaction):

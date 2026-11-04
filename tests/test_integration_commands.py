@@ -10,6 +10,7 @@ layer and the store are fakes, and no socket is opened.
 
 import asyncio
 
+import discord
 import pytest
 from discord import app_commands
 
@@ -139,6 +140,42 @@ async def test_sync_reports_what_it_reconciled(ui):
     assert ui.has_reward(ALICE) and not ui.has_reward(BOB)
 
 
+async def test_sync_reports_only_what_the_run_itself_changed(ui):
+    """A second /sync must not re-report the first one's grants.
+
+    roles_added and roles_removed are lifetime counters shared with the live
+    gateway path, while members_checked and currently_repping are per-run, so
+    quoting all four side by side told an admin that a sync which changed
+    nothing had just granted every role the previous run did.
+    """
+    ui.http.seed_members(GUILD, [member_payload(ALICE, GUILD),
+                                 member_payload(BOB, None, roles=[ROLE])])
+    ui.http.grant(GUILD, BOB, ROLE)
+
+    first = (await ui.run("sync")).followed_up
+    assert "Roles added:** 1" in first and "Roles removed:** 1" in first
+
+    # Nothing is left to reconcile: the member list now carries the role state
+    # the first run produced. A live update lands in between too, to prove the
+    # second report does not pick that up either. /sync keeps a per-member
+    # cooldown of its own, so the second run comes from a second admin.
+    ui.http.seed_members(GUILD, [member_payload(ALICE, GUILD, roles=[ROLE]),
+                                 member_payload(BOB, None)])
+    await ui.equip(user_id(4))
+    second_admin = FakeMember(user_id(5), name="Admin2", permissions=discord.Permissions(
+        manage_guild=True, manage_roles=True))
+    second = (await ui.run("sync", interaction=FakeInteraction(user=second_admin))).followed_up
+
+    assert "Members checked:** 2" in second
+    assert "Roles added:** 0" in second
+    assert "Roles removed:** 0" in second
+
+    # The lifetime totals are still there for /status: the first sync's grant
+    # plus the equip in between, and the first sync's one removal.
+    fields = field_values((await ui.run("status")).embed)
+    assert (fields["Roles Added"], fields["Roles Removed"]) == ("2", "1")
+
+
 async def test_sync_refuses_to_pile_up_on_a_running_sync(ui):
     entered, release = asyncio.Event(), asyncio.Event()
     ui.http.seed_members(GUILD, [member_payload(ALICE, GUILD)])
@@ -159,6 +196,49 @@ async def test_sync_refuses_to_pile_up_on_a_running_sync(ui):
         await first
 
     assert "already in progress" in interaction.replied
+
+
+async def test_sync_does_not_report_a_run_another_sync_took_from_it(ui):
+    """The window does not close at /sync's own is_syncing check.
+
+    Deferring the interaction is a round trip to Discord, and a sync can start
+    inside it: a second admin running /sync, the "Sync now" button on /setup,
+    or the startup sync. The service refuses the run at that point, and the
+    statistics it would hand back are one object per guild, shared by every
+    sync and by the live gateway path. Reporting them anyway told the admin
+    "Sync complete" over whatever the other run had reached so far, or over a
+    sync from hours ago, for a run that walked no members at all.
+    """
+    entered, release = asyncio.Event(), asyncio.Event()
+    ui.http.seed_members(GUILD, [member_payload(ALICE, GUILD)])
+    real_get_members = ui.http.get_members
+
+    async def gated(guild_id, *, limit, after):
+        entered.set()
+        await release.wait()
+        return await real_get_members(guild_id, limit=limit, after=after)
+
+    ui.http.get_members = gated
+    interaction = FakeInteraction()
+    real_defer = interaction.response.defer
+    taken: list[asyncio.Task] = []
+
+    async def defer_then_lose_the_guild(**kwargs):
+        await real_defer(**kwargs)
+        taken.append(asyncio.create_task(ui.service.full_sync(GUILD)))
+        await asyncio.wait_for(entered.wait(), 1)
+
+    interaction.response.defer = defer_then_lose_the_guild
+    try:
+        await ui.run("sync", interaction=interaction)
+    finally:
+        release.set()
+        await asyncio.gather(*taken)
+
+    assert "already in progress" in interaction.followed_up
+    assert "Sync complete" not in interaction.followed_up
+    # The run that did hold the guild still did its work.
+    assert ui.has_reward(ALICE)
 
 
 # --------------------------------------------------------------------------- #

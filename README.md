@@ -35,6 +35,8 @@ Discord exposes a member's equipped server tag on the User object as `primary_gu
 
 The bot watches raw `GUILD_MEMBER_UPDATE` gateway dispatches, which fire when that field changes, so role updates land in near real time across every server it's in. Per-server reward roles and streaks live in **tagbot-store**, a small Cloudflare Worker backed by D1 (encrypted at rest), reached over HTTPS with a bearer key, while the bot host still needs its runtime credentials; a full sync walks members and re-fetches users whose payloads omit the field, throttled to stay friendly with rate limits.
 
+`GUILD_MEMBER_REMOVE` is watched too. Leaving a server ends a streak there: the time served is banked into the member's longest and all-time totals, and their current streak stops counting, because nobody left in the server is repping its tag on their behalf. A full sync can't do this for them, since it only walks the members who are still there.
+
 ### Cooldowns and rate limits
 
 Commands and reward grants are both protected from being spammed, in

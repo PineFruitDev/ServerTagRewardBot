@@ -32,6 +32,23 @@ class HelpCommand(Command):
     def __init__(self, all_commands: list[Command]):
         self._all_commands = all_commands
 
+    def _entries(self) -> list[tuple[Command, CommandHelpInfo]]:
+        """Every slash command in the registry, each with the object that owns it.
+
+        Keyed on slash commands rather than on Command objects, because a slash
+        command is what someone reading /help is looking for. One object can
+        register several of them (SetupCommand registers /setup and /disable)
+        and its own help_info names only the first, so walking the objects left
+        /disable out of the overview and made /help command:disable answer "not
+        found" about a command the bot runs.
+
+        The owner comes along because the restrictions in the detail embed are
+        the Command's, shared by every slash command it registers.
+        """
+        return [(command, info)
+                for command in self._all_commands
+                for info in command.help_entries()]
+
     def register(self, tree: app_commands.CommandTree) -> None:
         @tree.command(name="help", description="Get help with bot commands")
         @app_commands.describe(command="Get detailed help for a specific command")
@@ -51,9 +68,10 @@ class HelpCommand(Command):
         await self._show_all(interaction)
 
     async def _show_specific(self, interaction: discord.Interaction, name: str) -> None:
-        target = next((cmd for cmd in self._all_commands if cmd.name == name.strip().lower()), None)
+        wanted = name.strip().lower()
+        found = next((pair for pair in self._entries() if pair[1].name == wanted), None)
 
-        if target is None:
+        if found is None:
             # Clamped, markdown-escaped, and mention-free: the name is raw user
             # input, so echoing it verbatim is both a ping vector and a way to
             # push the reply past Discord's 2000-character limit.
@@ -64,7 +82,7 @@ class HelpCommand(Command):
             )
             return
 
-        info = target.help_info
+        target, info = found
         embed = (
             discord.Embed(title=f"📖 Help: /{info.name}", description=info.description, color=0x00AE86)
             .add_field(name="📋 Usage", value=f"`{info.usage}`", inline=False)
@@ -84,9 +102,9 @@ class HelpCommand(Command):
         await interaction.response.send_message(embed=embed)
 
     async def _show_all(self, interaction: discord.Interaction) -> None:
-        categories: dict[str, list[Command]] = {}
-        for cmd in self._all_commands:
-            categories.setdefault(cmd.help_info.category, []).append(cmd)
+        categories: dict[str, list[CommandHelpInfo]] = {}
+        for _owner, info in self._entries():
+            categories.setdefault(info.category, []).append(info)
 
         embed = discord.Embed(
             title="🤖 Bot Commands",
@@ -96,8 +114,8 @@ class HelpCommand(Command):
         embed.set_footer(text="Use /help command:<name> for detailed help on a specific command")
         embed.timestamp = discord.utils.utcnow()
 
-        for category, commands in categories.items():
-            listing = "\n".join(f"`/{cmd.name}` - {cmd.description}" for cmd in commands)
+        for category, entries in categories.items():
+            listing = "\n".join(f"`/{info.name}` - {info.description}" for info in entries)
             embed.add_field(name=f"📂 {category}", value=listing, inline=False)
 
         await interaction.response.send_message(embed=embed)

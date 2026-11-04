@@ -103,6 +103,13 @@ class Command(ABC):
 
     help_info: CommandHelpInfo
 
+    #: Help for the slash commands this object registers beyond help_info.
+    #: One Command can register several (SetupCommand registers /disable
+    #: alongside /setup), and the help system enumerates slash commands rather
+    #: than Command objects, so anything missing from here is a working command
+    #: that /help both omits from its listing and reports as not found.
+    extra_help: tuple[CommandHelpInfo, ...] = ()
+
     #: Permissions the BOT needs for this command (guild_permissions attribute names)
     required_permissions: tuple[str, ...] = ()
 
@@ -136,6 +143,15 @@ class Command(ABC):
     @property
     def description(self) -> str:
         return self.help_info.description
+
+    def help_entries(self) -> list[CommandHelpInfo]:
+        """Help for every slash command this object registers, help_info first.
+
+        The gates below (guild_only, the permission tuples) belong to the
+        Command, so they apply to all of them: /setup and /disable share one
+        set of requirements because they share one object.
+        """
+        return [self.help_info, *self.extra_help]
 
     @abstractmethod
     def register(self, tree: app_commands.CommandTree) -> None:

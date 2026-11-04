@@ -168,6 +168,28 @@ async def test_manual_sync_only_runs_when_ready(interaction, monkeypatch, config
         interaction.response.defer.assert_not_awaited()
 
 
+async def test_manual_sync_does_not_claim_a_run_the_service_refused(interaction, monkeypatch):
+    """full_sync answers None for a run it did not perform, and that is not success.
+
+    The statistics are one object per guild, so the alternative is reporting
+    the figures of whichever sync does hold the guild, or of one that finished
+    hours ago, as the sync this command had just completed.
+    """
+    monkeypatch.setattr(GuildConfig, "_instance",
+                        SimpleNamespace(get_role=AsyncMock(return_value="10")))
+    # Nothing is running when /sync looks; the service still refuses, which is
+    # what happens when a sync starts while the interaction is being deferred.
+    monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
+        is_syncing=lambda gid: False, full_sync=AsyncMock(return_value=None),
+    ))
+
+    await SyncCommand().execute(interaction)
+
+    sent = interaction.followup.send.await_args.args[0]
+    assert "already in progress" in sent
+    assert "Sync complete" not in sent and "Members checked" not in sent
+
+
 @pytest.mark.parametrize("done", [True, False])
 @pytest.mark.parametrize("error,fragment", [
     (StoreUnavailable("offline"), "can't reach my storage"),
@@ -240,7 +262,10 @@ async def test_manual_sync_reports_a_stall_as_temporary_not_as_a_misconfiguratio
     """
     monkeypatch.setattr(GuildConfig, "_instance",
                         SimpleNamespace(get_role=AsyncMock(return_value="10")))
-    stats = GuildStats(members_checked=12, roles_added=3, stalled_after=5)
+    # roles_added is the lifetime counter /status reports; the run's own share
+    # is what this reply quotes, so the two are given different values here.
+    stats = GuildStats(members_checked=12, roles_added=9, stalled_after=5,
+                       last_sync_roles_added=3)
     monkeypatch.setattr(TagSyncService, "_instance", SimpleNamespace(
         is_syncing=lambda gid: False, full_sync=AsyncMock(return_value=stats),
     ))
@@ -249,7 +274,9 @@ async def test_manual_sync_reports_a_stall_as_temporary_not_as_a_misconfiguratio
     assert "Sync complete" not in sent
     assert "stopped early" in sent
     assert "again" in sent
-    # The work that did land is still reported.
-    assert "12" in sent and "3" in sent
+    # The work that did land is still reported, as this run's own share of it.
+    assert "Members checked before stopping:** 12" in sent
+    assert "Roles added:** 3" in sent
+    assert "9" not in sent
     # Nothing here is a permissions problem.
     assert "Manage Roles" not in sent
