@@ -383,7 +383,7 @@ async def test_leaderboard_ignores_members_with_nothing_banked(ui, clock):
 
     interaction = await ui.run("leaderboard")
 
-    assert "Nobody has repped the tag yet" in interaction.replied
+    assert "No current streaks yet" in interaction.replied
 
 
 # --------------------------------------------------------------------------- #
@@ -434,7 +434,7 @@ async def test_a_members_full_reward_lifecycle(fresh_ui, clock):
     # The history survives: still on the all-time board, no longer on the current one
     total_board = await ui.run("leaderboard", app_commands.Choice(name="all-time", value="total"))
     assert f"\U0001F947 <@{ALICE}> {SEP} **2h**" in total_board.embed.description
-    assert "Nobody has repped the tag yet" in (await ui.run("leaderboard")).replied
+    assert "No current streaks yet" in (await ui.run("leaderboard")).replied
 
     # And /status has counted both transitions
     fields = field_values((await ui.run("status")).embed)

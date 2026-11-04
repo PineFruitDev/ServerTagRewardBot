@@ -267,7 +267,7 @@ async def test_a_busy_server_refuses_a_member_who_has_run_nothing(ui, ticking):
     assert "being used a lot in this server" in refused.replied
     ticking.advance(60)
     allowed = await ui.run("leaderboard", interaction=FakeInteraction(user=FakeMember(user_id(3))))
-    assert "Nobody has repped the tag yet" in allowed.replied
+    assert "No current streaks yet" in allowed.replied
 
 
 async def test_setup_and_disable_do_not_share_a_cooldown(ui, ticking):

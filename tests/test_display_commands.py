@@ -87,7 +87,7 @@ async def test_leaderboard_renders_rank_and_sort(context, sort, label):
 async def test_empty_leaderboard(context):
     interaction, _, _ = context
     await LeaderboardCommand().execute(interaction)
-    assert "Nobody" in interaction.response.send_message.await_args.args[0]
+    assert "No current streaks" in interaction.response.send_message.await_args.args[0]
 
 
 @pytest.mark.parametrize("sort", ["bogus", "", "CURRENT", "Longest"])
