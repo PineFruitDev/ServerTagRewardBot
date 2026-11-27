@@ -6,7 +6,9 @@ Reward members across the UGC space for representing your Discord community, fro
 
 Built on the [PyTemplateBot](https://github.com/PineFruitDev/PyTemplateBot) architecture: command class pattern, single source of truth, discord.py.
 
-**Website:** [bots.modulix.gg/tag-rewards](https://bots.modulix.gg/tag-rewards) · More Discord bots and free tools from Modulix: [bots.modulix.gg](https://bots.modulix.gg/) · [Discord account age checker](https://bots.modulix.gg/tools/account-age)
+**Website:** [bots.modulix.gg/tag-rewards](https://bots.modulix.gg/tag-rewards) · [Discord account age checker](https://bots.modulix.gg/tools/account-age)
+
+Explore more Discord bots and free tools at [Modulix Bots](https://bots.modulix.gg).
 
 ## Features
 
